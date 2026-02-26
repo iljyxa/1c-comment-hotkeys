@@ -85,7 +85,7 @@ jobs:
               if "pyside6\\plugins\\" in name:
                   keep_plugin_tokens = (
                       "pyside6\\plugins\\platforms\\qwindows",
-                      "pyside6\\plugins\\styles\\qwindowsvistastyle",
+                      "pyside6\\plugins\\styles\\qmodernwindowsstyle",
                       "pyside6\\plugins\\imageformats\\qico",
                       "pyside6\\plugins\\imageformats\\qsvg",
                       "pyside6\\plugins\\iconengines\\qsvgicon",
