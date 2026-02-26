@@ -18,6 +18,7 @@ class Comment:
     template: str
     hotkey: str = ""
     source: str = ""
+    hidden: bool = False
     
     def to_dict(self) -> dict:
         """Преобразовать в словарь."""
@@ -26,11 +27,19 @@ class Comment:
     @staticmethod
     def from_dict(data: dict) -> 'Comment':
         """Создать объект из словаря."""
+        hidden_raw = data.get("hidden", False)
+        if isinstance(hidden_raw, bool):
+            hidden = hidden_raw
+        elif isinstance(hidden_raw, str):
+            hidden = hidden_raw.strip().lower() in ("1", "true", "yes", "on", "да", "истина")
+        else:
+            hidden = bool(hidden_raw)
         return Comment(
             name=data.get("name", ""),
             template=data.get("template", ""),
             hotkey=data.get("hotkey", ""),
             source=data.get("source", ""),
+            hidden=hidden,
         )
 
 
@@ -117,15 +126,15 @@ class CommentsRepository:
         self._comments = [
             Comment(
                 name="Код добавлен",
-                template="{@line_limit max=120 mode=wrap suffix=\"// \"}// + {author}. {datetime}. [{issue_key}] {issue_summary}{@end}\n{text}\n// - {author}. {datetime}.",
+                template="{@line_limit max=110 mode=wrap suffix=\"// \"}// + {author}. {datetime}. [{issue_key}] {issue_summary}{@end}\n{text}\n// - {author}. {datetime}.",
             ),
             Comment(
                 name="Код удален",
-                template="{@line_limit max=120 mode=wrap suffix=\"// \"}// + {author}. {datetime}. [{issue_key}] {issue_summary}{@end}\n{text|prefix=\"// \"}\n// - {author}. {datetime}.",
+                template="{@line_limit max=110 mode=wrap suffix=\"// \"}// + {author}. {datetime}. [{issue_key}] {issue_summary}{@end}\n{text|prefix=\"// \"}\n// - {author}. {datetime}.",
             ),
             Comment(
                 name="Функция добавлена",
-                template="{@line_limit max=120 mode=wrap suffix=\"// \"}// {author}. {datetime}. [{issue_key}] {issue_summary}{@end}",
+                template="{@line_limit max=110 mode=wrap suffix=\"// \"}// {author}. {datetime}. [{issue_key}] {issue_summary}{@end}",
             ),
             Comment(
                 name="Коммит",

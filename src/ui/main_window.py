@@ -151,11 +151,15 @@ class CommentEditDialog(QDialog):
         self.source_combo.addItems(self.source_names)
         layout.addRow("Источник:", self.source_combo)
 
+        # Признак скрытого комментария в диалоге выбора по глобальной клавише
+        self.hidden_checkbox = QCheckBox()
+        layout.addRow("Скрытый:", self.hidden_checkbox)
+
         # Подсказка по макросам
         macros_label = QLabel(
             "Макросы: {text}, {date}, {time}, {datetime}, {issue_key}, {issue_summary}, {author}\n"
             "Модификатор: {text|prefix=\"// \"} — добавить префикс к каждой непустой строке {text}\n"
-            "Директива блока: {@line_limit max=120 mode=wrap suffix=\"// \"}...{@end}\n"
+            "Директива блока: {@line_limit max=110 mode=wrap suffix=\"// \"}...{@end}\n"
             "Ограничивает длину строк только внутри блока, переносит по пробелам, suffix добавляет префикс"
             " к продолжению строки."
         )
@@ -239,6 +243,7 @@ class CommentEditDialog(QDialog):
         index = self.source_combo.findText(comment.source)
         if index >= 0:
             self.source_combo.setCurrentIndex(index)
+        self.hidden_checkbox.setChecked(bool(comment.hidden))
     
     def get_comment(self) -> Comment:
         """Считать комментарий из формы.
@@ -251,6 +256,7 @@ class CommentEditDialog(QDialog):
             template=self.template_input.toPlainText(),
             hotkey=self.hotkey_input.text().strip(),
             source=self.source_combo.currentText().strip(),
+            hidden=self.hidden_checkbox.isChecked(),
         )
 
 
@@ -568,6 +574,7 @@ class MainWindow(QMainWindow):
             template=original.template,
             hotkey=original.hotkey,
             source=original.source,
+            hidden=original.hidden,
         )
         dialog = CommentEditDialog(
             source_names=self._get_source_names(),

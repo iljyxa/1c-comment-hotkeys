@@ -4,6 +4,7 @@ import time
 import logging
 import os
 import re
+import ctypes
 from typing import Optional
 
 import pyperclip
@@ -27,10 +28,28 @@ class ClipboardService:
         self.template_engine = template_engine
         self._keyboard = Controller()
         self._copy_delay = 0.04  # Минимальная стабильная задержка после Ctrl+C
-        self._paste_delay = 0.01  # Минимальная задержка перед Ctrl+V
-        self._post_paste_clear_delay = 0.03  # Пауза после Ctrl+V перед очисткой буфера
+        self._paste_delay = 0.03  # Увеличено для более надежной вставки перед Ctrl+V
+        self._post_paste_clear_delay = 0.06  # Увеличено перед восстановлением буфера после Ctrl+V
         self._copy_shortcut = "ctrl+c"
         self._paste_shortcut = "ctrl+v"
+        self._clipboard_backup: Optional[str] = None
+
+    def _ensure_clipboard_backup(self) -> None:
+        """Сохранить текущее значение буфера, если еще не сохранено."""
+        if self._clipboard_backup is not None:
+            return
+        self._clipboard_backup = pyperclip.paste()
+        logger.debug("Исходное значение буфера обмена сохранено")
+
+    def restore_original_clipboard(self) -> None:
+        """Восстановить исходное значение буфера обмена после обработки."""
+        if self._clipboard_backup is None:
+            return
+        try:
+            pyperclip.copy(self._clipboard_backup)
+            logger.debug("Буфер обмена восстановлен")
+        finally:
+            self._clipboard_backup = None
     
     def capture_selected_text(
         self,
@@ -40,8 +59,9 @@ class ClipboardService:
     ) -> Optional[str]:
         """Скопировать выделенный текст и вернуть его из буфера обмена."""
         try:
-            pyperclip.copy("")
-            time.sleep(0.005)
+            self._ensure_clipboard_backup()
+            baseline_text = pyperclip.paste()
+            baseline_seq = self._get_clipboard_sequence_number()
             logger.info("Захват выделенного текста через комбинацию копирования")
 
             effective_copy_delay = self._copy_delay if copy_delay is None else max(0.0, copy_delay)
@@ -49,13 +69,25 @@ class ClipboardService:
             if effective_copy_delay > 0:
                 time.sleep(effective_copy_delay)
 
-            text = ""
+            text = baseline_text
+            copied = False
             deadline = time.time() + max(0.0, max_wait)
             while time.time() < deadline:
                 time.sleep(max(0.005, poll_interval))
                 text = pyperclip.paste()
-                if text:
+                if baseline_seq is not None:
+                    current_seq = self._get_clipboard_sequence_number()
+                    if current_seq is not None and current_seq != baseline_seq:
+                        copied = True
+                        break
+                elif text != baseline_text:
+                    copied = True
                     break
+
+            if not copied:
+                logger.warning("Буфер обмена не изменился после копирования, продолжаем с пустым текстом")
+                return ""
+
             if text and not str(text).strip():
                 # Некоторые приложения кладут в буфер только пробелы/перевод строки.
                 text = ""
@@ -67,6 +99,16 @@ class ClipboardService:
             return text
         except Exception as e:
             logger.error("Не удалось захватить выделенный текст: %s", e, exc_info=True)
+            return None
+
+    @staticmethod
+    def _get_clipboard_sequence_number() -> Optional[int]:
+        """Вернуть номер изменения буфера обмена (Windows API)."""
+        if os.name != "nt":
+            return None
+        try:
+            return int(ctypes.windll.user32.GetClipboardSequenceNumber())
+        except Exception:
             return None
 
     def process_captured_text(
@@ -106,18 +148,17 @@ class ClipboardService:
                 len(modified_text),
             )
             self._send_shortcut(self._paste_shortcut)
-            # Даем приложению время принять Ctrl+V перед очисткой буфера.
+            # Даем приложению время принять Ctrl+V перед восстановлением буфера.
             time.sleep(self._post_paste_clear_delay)
-            
-            # Шаг 4. Очищаем буфер, чтобы не вставлять старое значение повторно
-            pyperclip.copy("")
-            
+
             logger.info("Обработка текста завершена успешно")
             return True
             
         except Exception as e:
             logger.error("Не удалось обработать текст: %s", e, exc_info=True)
             return False
+        finally:
+            self.restore_original_clipboard()
 
     def _send_shortcut(self, shortcut: str) -> None:
         """Отправить сочетание клавиш через backend `pynput`."""
@@ -241,15 +282,21 @@ class ClipboardService:
         return width
 
     def _detect_indent_prefix(self, text: str) -> str:
-        """Найти минимальный ненулевой отступ среди строк выделенного текста."""
+        """Найти минимальный отступ среди строк выделенного текста.
+
+        Если среди непустых строк, начиная со второй, есть строка без отступа,
+        считаем минимальный отступ нулевым и не добавляем префикс.
+        """
         candidate_prefix = ""
         candidate_width = None
 
-        for line in text.splitlines():
+        for index, line in enumerate(text.splitlines()):
             if not line:
                 continue
             match = re.match(r"^[ \t]+", line)
             if not match:
+                if index > 0 and line.strip():
+                    return ""
                 continue
             prefix = match.group(0)
             # Пропускаем строки, состоящие только из отступа.

@@ -294,6 +294,7 @@ class Application:
             if captured is None:
                 logger.warning("Горячая клавиша нажата, но захват выделенного текста не удался")
                 self._hotkey_cooldown_until = time.monotonic() + 0.2
+                self.clipboard_service.restore_original_clipboard()
                 return
 
             self._hotkey_cooldown_until = time.monotonic() + 0.1
@@ -312,11 +313,16 @@ class Application:
         try:
             logger.info("Открытие диалога выбора комментария")
             # Получаем актуальный список комментариев
-            comments = self.repository.get_all()
+            comments = [
+                comment
+                for comment in self.repository.get_all()
+                if not bool(getattr(comment, "hidden", False))
+            ]
             
             if not comments:
                 logger.warning("Нет доступных комментариев")
                 self._captured_text = None
+                self.clipboard_service.restore_original_clipboard()
                 return
             
             # Создаем и показываем диалог выбора комментария
@@ -329,11 +335,13 @@ class Application:
             if result == CommentDialog.Rejected:
                 logger.info("Диалог выбора комментария отменен")
                 self._captured_text = None
+                self.clipboard_service.restore_original_clipboard()
                 return
 
             if selected_comment is None:
                 logger.warning("Диалог закрыт без выбранного комментария")
                 self._captured_text = None
+                self.clipboard_service.restore_original_clipboard()
                 return
 
             # Важно: запускаем обработку после полного закрытия модального диалога.
@@ -342,6 +350,7 @@ class Application:
         except Exception as e:
             self._captured_text = None
             self.comment_dialog = None
+            self.clipboard_service.restore_original_clipboard()
             logger.error("Ошибка при показе диалога комментариев: %s", e, exc_info=True)
     
     def _on_comment_selected(self, comment) -> None:
@@ -353,6 +362,7 @@ class Application:
         logger.info("Выбран комментарий: %s", comment.name)
         if self._captured_text is None:
             logger.warning("Для выбранного комментария отсутствует захваченный текст")
+            self.clipboard_service.restore_original_clipboard()
             return
         
         captured_text = self._captured_text
@@ -371,6 +381,7 @@ class Application:
             context = self._resolve_comment_context(comment)
             if context is None:
                 logger.info("Обработка комментария отменена пользователем при выборе задачи Jira")
+                self.clipboard_service.restore_original_clipboard()
                 return
             context["author"] = self.settings_repository.get_author()
 
@@ -391,6 +402,7 @@ class Application:
         except Exception as e:
             logger.error("Ошибка при обработке текста: %s", e, exc_info=True)
         finally:
+            self.clipboard_service.restore_original_clipboard()
             self._target_window_handle = None
 
     @staticmethod

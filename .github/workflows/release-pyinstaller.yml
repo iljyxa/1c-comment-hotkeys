@@ -29,15 +29,156 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Build executable
+      - name: Install UPX
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --windowed --onedir --name "1c-comment-hotkeys" --paths "src" --icon "src/resources/icon.ico" "src/app.py"
+          choco install upx -y --no-progress
+          upx --version
+
+      - name: Generate minimal onefile spec
+        shell: pwsh
+        run: |
+          @'
+          # -*- mode: python ; coding: utf-8 -*-
+          
+          block_cipher = None
+          
+          def _norm(path: str) -> str:
+              return str(path or "").replace("/", "\\").lower()
+          
+          def _keep_binary(entry) -> bool:
+              name = _norm(entry[0])
+          
+              blocked_dll_tokens = (
+                  "qt6pdf",
+                  "qt6pdfwidgets",
+                  "qt6qml",
+                  "qt6quick",
+                  "qt6quickcontrols2",
+                  "qt6webengine",
+                  "qt6webchannel",
+                  "qt6networkauth",
+                  "qt6remoteobjects",
+                  "qt6scxml",
+                  "qt6sensors",
+                  "qt6serialbus",
+                  "qt6serialport",
+                  "qt6virtualkeyboard",
+                  "qt6charts",
+                  "qt6datavisualization",
+                  "qt6multimedia",
+                  "qt6multimediawidgets",
+                  "qt6positioning",
+                  "qt6location",
+                  "qt6openglwidgets",
+                  "qt6sql",
+                  "qt6statemachine",
+                  "qt6texttospeech",
+                  "qt6websockets",
+                  "qt6httpserver",
+                  "qt6help",
+                  "qt6designer",
+              )
+              if any(token in name for token in blocked_dll_tokens):
+                  return False
+          
+              if "pyside6\\plugins\\" in name:
+                  keep_plugin_tokens = (
+                      "pyside6\\plugins\\platforms\\qwindows",
+                      "pyside6\\plugins\\styles\\qwindowsvistastyle",
+                      "pyside6\\plugins\\imageformats\\qico",
+                      "pyside6\\plugins\\imageformats\\qsvg",
+                      "pyside6\\plugins\\iconengines\\qsvgicon",
+                  )
+                  return any(token in name for token in keep_plugin_tokens)
+          
+              return True
+          
+          excluded_modules = [
+              "PySide6.QtPdf",
+              "PySide6.QtPdfWidgets",
+              "PySide6.QtQml",
+              "PySide6.QtQmlCore",
+              "PySide6.QtQuick",
+              "PySide6.QtQuickControls2",
+              "PySide6.QtQuickWidgets",
+              "PySide6.QtWebEngineCore",
+              "PySide6.QtWebEngineWidgets",
+              "PySide6.QtWebChannel",
+              "PySide6.QtMultimedia",
+              "PySide6.QtMultimediaWidgets",
+              "PySide6.QtBluetooth",
+              "PySide6.QtNfc",
+              "PySide6.QtPositioning",
+              "PySide6.QtLocation",
+              "PySide6.QtSql",
+              "PySide6.QtNetworkAuth",
+              "PySide6.QtOpenGLWidgets",
+              "PySide6.QtWebSockets",
+              "PySide6.QtHttpServer",
+              "PySide6.QtDesigner",
+              "PySide6.QtHelp",
+              "PySide6.QtRemoteObjects",
+              "PySide6.QtScxml",
+              "PySide6.QtSensors",
+              "PySide6.QtSerialBus",
+              "PySide6.QtSerialPort",
+              "PySide6.QtTextToSpeech",
+              "PySide6.QtVirtualKeyboard",
+              "PySide6.QtCharts",
+              "PySide6.QtDataVisualization",
+          ]
+          
+          a = Analysis(
+              ["src/app.py"],
+              pathex=["src"],
+              binaries=[],
+              datas=[],
+              hiddenimports=[],
+              hookspath=[],
+              hooksconfig={},
+              runtime_hooks=[],
+              excludes=excluded_modules,
+              noarchive=False,
+          )
+          
+          a.binaries = [entry for entry in a.binaries if _keep_binary(entry)]
+          a.datas = [
+              entry for entry in a.datas
+              if "pyside6\\translations\\" not in _norm(entry[0])
+              and "pyside6/translations/" not in _norm(entry[0])
+          ]
+          
+          pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+          
+          exe = EXE(
+              pyz,
+              a.scripts,
+              a.binaries,
+              a.zipfiles,
+              a.datas,
+              [],
+              name="1c-comment-hotkeys",
+              debug=False,
+              bootloader_ignore_signals=False,
+              strip=False,
+              upx=True,
+              upx_exclude=[],
+              runtime_tmpdir=None,
+              console=False,
+              icon="src/resources/icon.ico",
+          )
+          '@ | Set-Content -Path "build_onefile_min.spec" -Encoding UTF8
+
+      - name: Build onefile executable
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean "build_onefile_min.spec"
 
       - name: Pack artifact
         shell: pwsh
         run: |
-          Compress-Archive -Path "dist/1c-comment-hotkeys/*" -DestinationPath "1c-comment-hotkeys-windows.zip"
+          Compress-Archive -Path "dist/1c-comment-hotkeys.exe" -DestinationPath "1c-comment-hotkeys-windows.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

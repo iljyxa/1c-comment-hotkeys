@@ -203,7 +203,7 @@ line 2
 ### Блочная директива `line_limit`
 
 Формат:
-- `{@line_limit max=120 mode=wrap suffix="// "}`
+- `{@line_limit max=110 mode=wrap suffix="// "}`
 - `...текст и/или макросы внутри блока...`
 - `{@end}`
 
@@ -220,7 +220,7 @@ line 2
 Пример выборочного применения:
 
 ```text
-{@line_limit max=120 mode=wrap suffix="// "}
+{@line_limit max=110 mode=wrap suffix="// "}
 // + {author}. {datetime}. [{issue_key}] {issue_summary}
 {@end}
 {text}
