@@ -29,10 +29,49 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Install UPX
+        shell: pwsh
+        run: |
+          choco install upx -y --no-progress
+          upx --version
+
       - name: Build executable
         shell: pwsh
         run: |
           pyinstaller --noconfirm --clean --windowed --onedir --name "1c-comment-hotkeys" --paths "src" --icon "src/resources/icon.ico" "src/app.py"
+
+      - name: Slim runtime payload
+        shell: pwsh
+        run: |
+          $distDir = "dist/1c-comment-hotkeys"
+          $pluginsDir = Join-Path $distDir "PySide6/plugins"
+          $translationsDir = Join-Path $distDir "PySide6/translations"
+
+          Write-Host "Size before slimming:"
+          (Get-ChildItem $distDir -Recurse -File | Measure-Object Length -Sum).Sum
+
+          if (Test-Path $pluginsDir) {
+            $keepPluginDirs = @("platforms", "styles", "imageformats", "iconengines")
+            Get-ChildItem $pluginsDir -Directory | ForEach-Object {
+              if ($keepPluginDirs -notcontains $_.Name) {
+                Remove-Item $_.FullName -Recurse -Force
+              }
+            }
+
+            $platformsDir = Join-Path $pluginsDir "platforms"
+            if (Test-Path $platformsDir) {
+              Get-ChildItem $platformsDir -File | Where-Object { $_.Name -ne "qwindows.dll" } | Remove-Item -Force
+            }
+          }
+
+          if (Test-Path $translationsDir) {
+            Remove-Item $translationsDir -Recurse -Force
+          }
+
+          Get-ChildItem $distDir -Recurse -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force
+
+          Write-Host "Size after slimming:"
+          (Get-ChildItem $distDir -Recurse -File | Measure-Object Length -Sum).Sum
 
       - name: Pack artifact
         shell: pwsh

@@ -153,8 +153,11 @@ class CommentEditDialog(QDialog):
 
         # Подсказка по макросам
         macros_label = QLabel(
-            "Доступные макросы: {text}, {date}, {time}, {datetime}, "
-            "{issue_key}, {issue_summary}, {author}"
+            "Макросы: {text}, {date}, {time}, {datetime}, {issue_key}, {issue_summary}, {author}\n"
+            "Модификатор: {text|prefix=\"// \"} — добавить префикс к каждой непустой строке {text}\n"
+            "Директива блока: {@line_limit max=120 mode=wrap suffix=\"// \"}...{@end}\n"
+            "Ограничивает длину строк только внутри блока, переносит по пробелам, suffix добавляет префикс"
+            " к продолжению строки."
         )
         macros_label.setWordWrap(True)
         macros_label.setStyleSheet("color: gray; font-size: 10pt;")
