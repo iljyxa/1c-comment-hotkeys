@@ -4,7 +4,6 @@ import time
 import logging
 import os
 import re
-import textwrap
 from typing import Optional
 
 import pyperclip
@@ -93,7 +92,6 @@ class ClipboardService:
                     first_line_indent,
                     indent_prefix,
                 )
-            modified_text = self._enforce_max_line_length(modified_text, max_len=120)
             
             # Шаг 2. Записываем результат в буфер обмена
             logger.info("Запись результата в буфер обмена")
@@ -311,34 +309,3 @@ class ClipboardService:
                 adjusted.append(line)
 
         return "\n".join(adjusted)
-
-    @staticmethod
-    def _enforce_max_line_length(text: str, max_len: int) -> str:
-        """Перенести строки по словам с учетом итоговой длины и отступов."""
-        if max_len <= 0:
-            return text
-
-        wrapped_lines = []
-        for line in text.splitlines():
-            if len(line) <= max_len:
-                wrapped_lines.append(line)
-                continue
-
-            leading_ws_match = re.match(r"^[ \t]*", line)
-            leading_ws = leading_ws_match.group(0) if leading_ws_match else ""
-            content = line[len(leading_ws):]
-            if not content:
-                wrapped_lines.append(line)
-                continue
-
-            parts = textwrap.wrap(
-                content,
-                width=max_len,
-                break_long_words=False,
-                break_on_hyphens=False,
-                initial_indent=leading_ws,
-                subsequent_indent=f"{leading_ws}// ",
-            )
-            wrapped_lines.extend(parts if parts else [line])
-
-        return "\n".join(wrapped_lines)

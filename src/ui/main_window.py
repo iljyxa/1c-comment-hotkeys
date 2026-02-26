@@ -150,11 +150,11 @@ class CommentEditDialog(QDialog):
         self.source_combo.addItem("")
         self.source_combo.addItems(self.source_names)
         layout.addRow("Источник:", self.source_combo)
-        
+
         # Подсказка по макросам
         macros_label = QLabel(
             "Доступные макросы: {text}, {date}, {time}, {datetime}, "
-            "{issue_key}, {issue_summary}"
+            "{issue_key}, {issue_summary}, {author}"
         )
         macros_label.setWordWrap(True)
         macros_label.setStyleSheet("color: gray; font-size: 10pt;")
@@ -397,6 +397,10 @@ class MainWindow(QMainWindow):
         hotkey_row.addWidget(self.hotkey_input)
         hotkey_row.addWidget(self.assign_hotkey_button)
         settings_layout.addRow("Глобальная горячая клавиша:", hotkey_row)
+
+        self.author_input = QLineEdit()
+        self.author_input.setPlaceholderText("AUTHOR")
+        settings_layout.addRow("Автор:", self.author_input)
 
         self.start_minimized_checkbox = QCheckBox("Запускать в системном трее")
         self.log_to_file_checkbox = QCheckBox("Лог")
@@ -694,6 +698,7 @@ class MainWindow(QMainWindow):
             self.settings_repository.set_log_to_file(
                 self.log_to_file_checkbox.isChecked()
             )
+            self.settings_repository.set_author(self.author_input.text())
             self.settings_repository.save()
             self.repository.save()
             QMessageBox.information(self, "Успех", "Настройки и комментарии сохранены")
@@ -713,6 +718,7 @@ class MainWindow(QMainWindow):
         self.log_to_file_checkbox.setChecked(
             self.settings_repository.get_log_to_file()
         )
+        self.author_input.setText(self.settings_repository.get_author())
 
     def _on_log_to_file_toggled(self, checked: bool) -> None:
         """Включить/выключить запись логов в файл сразу при переключении флага."""

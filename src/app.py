@@ -372,6 +372,7 @@ class Application:
             if context is None:
                 logger.info("Обработка комментария отменена пользователем при выборе задачи Jira")
                 return
+            context["author"] = self.settings_repository.get_author()
 
             # Восстановить окно назначения непосредственно перед вставкой.
             self._restore_foreground_window_handle(self._target_window_handle)

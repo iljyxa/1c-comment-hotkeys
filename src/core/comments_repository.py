@@ -116,12 +116,16 @@ class CommentsRepository:
         """Создать набор шаблонов по умолчанию, если файл отсутствует."""
         self._comments = [
             Comment(
-                name="Фрагмент изменен",
-                template="// + AUTHOR. {datetime}. [{issue_key}] {issue_summary}\n{text}\n// - AUTHOR. {datetime}.",
+                name="Код добавлен",
+                template="{@line_limit max=120 mode=wrap suffix=\"// \"}// + {author}. {datetime}. [{issue_key}] {issue_summary}{@end}\n{text}\n// - {author}. {datetime}.",
+            ),
+            Comment(
+                name="Код удален",
+                template="{@line_limit max=120 mode=wrap suffix=\"// \"}// + {author}. {datetime}. [{issue_key}] {issue_summary}{@end}\n{text|prefix=\"// \"}\n// - {author}. {datetime}.",
             ),
             Comment(
                 name="Функция добавлена",
-                template="// AUTHOR. {datetime}. [{issue_key}] {issue_summary}",
+                template="{@line_limit max=120 mode=wrap suffix=\"// \"}// {author}. {datetime}. [{issue_key}] {issue_summary}{@end}",
             ),
             Comment(
                 name="Коммит",
@@ -129,6 +133,6 @@ class CommentsRepository:
             ),
             Comment(
                 name="Метаданные",
-                template="// AUTHOR. {date}. {issue_key}.",
+                template="// {author}. {date}. {issue_key}.",
             ),
         ]
