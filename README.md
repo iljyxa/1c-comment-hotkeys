@@ -90,7 +90,8 @@ python src/app.py
   ],
   "ui": {
     "start_minimized": true,
-    "log_to_file": false
+    "log_to_file": false,
+    "author": "AUTHOR"
   }
 }
 ```
@@ -105,14 +106,19 @@ python src/app.py
 ```json
 [
   {
-    "name": "Фрагмент изменен",
-    "template": "// + AUTHOR. {datetime}. [{issue_key}] {issue_summary}\n{text}\n// - AUTHOR. {datetime}.",
+    "name": "Код добавлен",
+    "template": "{@line_limit max=110 mode=wrap suffix=\"// \"}// + {author}. {datetime}. [{issue_key}] {issue_summary}{@end}\n{text}\n// - {author}. {datetime}.",
     "hotkey": "ctrl+alt+1",
-    "source": "Мой Jira фильтр"
+    "source": "Мой Jira фильтр",
+    "hidden": false
+  },
+  {
+    "name": "Код удален",
+    "template": "{@line_limit max=110 mode=wrap suffix=\"// \"}// + {author}. {datetime}. [{issue_key}] {issue_summary}{@end}\n{text|prefix=\"// \"}\n// - {author}. {datetime}."
   },
   {
     "name": "Функция добавлена",
-    "template": "// AUTHOR. {datetime}. [{issue_key}] {issue_summary}"
+    "template": "{@line_limit max=110 mode=wrap suffix=\"// \"}// {author}. {datetime}. [{issue_key}] {issue_summary}{@end}"
   },
   {
     "name": "Коммит",
@@ -120,13 +126,14 @@ python src/app.py
   },
   {
     "name": "Метаданные",
-    "template": "// AUTHOR. {date}. {issue_key}."
+    "template": "// {author}. {date}. {issue_key}."
   }
 ]
 ```
 
 `hotkey` (опционально) задаёт быструю вставку конкретного комментария без диалога выбора.  
 `source` (опционально) хранит название Jira-источника для комментария.
+`hidden` (опционально) скрывает комментарий из диалога при нажатии глобальной горячей клавиши.
 
 ### Файл jira_sources.json
 
