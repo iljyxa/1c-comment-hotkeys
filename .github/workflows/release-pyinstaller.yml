@@ -177,16 +177,11 @@ jobs:
         run: |
           pyinstaller --noconfirm --clean "build_onefile_min.spec"
 
-      - name: Pack artifact
-        shell: pwsh
-        run: |
-          Compress-Archive -Path "dist/1c-comment-hotkeys.exe" -DestinationPath "1c-comment-hotkeys-windows.zip"
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: release-windows
-          path: 1c-comment-hotkeys-windows.zip
+          path: dist/1c-comment-hotkeys.exe
 
   release:
     name: Publish GitHub Release
@@ -204,4 +199,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            release-assets/release-windows/1c-comment-hotkeys-windows.zip
+            release-assets/release-windows/1c-comment-hotkeys.exe

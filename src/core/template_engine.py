@@ -348,18 +348,26 @@ class TemplateEngine:
         if not lines:
             return value
 
+        base_indent_width = None
+        for raw_line in lines:
+            line, _ = TemplateEngine._extract_line_ending(raw_line)
+            if not line:
+                continue
+            match = re.match(r"^[ \t]*", line)
+            prefix = match.group(0) if match else ""
+            if len(prefix) == len(line):
+                continue
+            width = TemplateEngine._indent_width(prefix)
+            if base_indent_width is None or width < base_indent_width:
+                base_indent_width = width
+                if base_indent_width == 0:
+                    break
+        if base_indent_width is None:
+            base_indent_width = 0
+
         result = []
         for line in lines:
-            line_ending = ""
-            if line.endswith("\r\n"):
-                line_ending = "\r\n"
-                line = line[:-2]
-            elif line.endswith("\n"):
-                line_ending = "\n"
-                line = line[:-1]
-            elif line.endswith("\r"):
-                line_ending = "\r"
-                line = line[:-1]
+            line, line_ending = TemplateEngine._extract_line_ending(line)
 
             if not line:
                 result.append(line_ending)
@@ -367,8 +375,18 @@ class TemplateEngine:
 
             match = re.match(r"^[ \t]*", line)
             leading = match.group(0) if match else ""
-            rest = line[len(leading):]
-            result.append(f"{leading}{arg}{rest}{line_ending}")
+            content = line[len(leading):]
+            if not leading:
+                result.append(f"{arg}{content}{line_ending}")
+                continue
+
+            pre, remaining = TemplateEngine._split_ws_by_width(leading, base_indent_width)
+            mid, post = TemplateEngine._split_ws_by_width(remaining, len(arg))
+            if TemplateEngine._indent_width(remaining) < len(arg):
+                new_leading = f"{pre}{arg}{remaining}"
+            else:
+                new_leading = f"{pre}{arg}{post}"
+            result.append(f"{new_leading}{content}{line_ending}")
 
         return "".join(result)
 
@@ -381,6 +399,32 @@ class TemplateEngine:
         if line.endswith("\r"):
             return line[:-1], "\r"
         return line, ""
+
+    @staticmethod
+    def _indent_width(prefix: str) -> int:
+        width = 0
+        for ch in prefix:
+            if ch == "\t":
+                width += 4
+            elif ch == " ":
+                width += 1
+        return width
+
+    @staticmethod
+    def _split_ws_by_width(prefix: str, target_width: int) -> tuple[str, str]:
+        if target_width <= 0 or not prefix:
+            return "", prefix
+        width = 0
+        for idx, ch in enumerate(prefix):
+            if ch == "\t":
+                width += 4
+            elif ch == " ":
+                width += 1
+            else:
+                break
+            if width >= target_width:
+                return prefix[: idx + 1], prefix[idx + 1 :]
+        return prefix, ""
 
     def _block_line_limit(self, value: str, args: tuple[tuple[str, str], ...]) -> str:
         options = {k: v for k, v in args}
