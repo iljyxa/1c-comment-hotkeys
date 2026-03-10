@@ -4,6 +4,7 @@ import sys
 import logging
 import platform
 import time
+import threading
 import ctypes
 from pathlib import Path
 
@@ -91,6 +92,7 @@ class Application:
             jira_sources_repository=self.jira_sources_repository,
             hotkey_change_handler=self._apply_hotkey,
             log_to_file_change_handler=self._apply_file_logging,
+            refresh_sources_handler=self._refresh_all_sources,
             exit_handler=self.request_exit,
         )
         self.main_window.setWindowIcon(self.qt_app.windowIcon())
@@ -129,6 +131,43 @@ class Application:
         self._file_log_handler.close()
         self._file_log_handler = None
         logger.info("Логирование в файл отключено")
+
+    def _refresh_all_sources(self) -> None:
+        """Обновить все источники Jira в фоне."""
+        sources = self.jira_sources_repository.get_all()
+        if not sources:
+            QMessageBox.information(
+                self.main_window,
+                "Jira",
+                "Список источников пуст.",
+            )
+            return
+
+        def worker() -> None:
+            errors: list[str] = []
+            for source in sources:
+                try:
+                    self.jira_issues_service.refresh_source(source)
+                except Exception as exc:
+                    errors.append(f"{source.name}: {exc}")
+
+            def notify() -> None:
+                if errors:
+                    QMessageBox.warning(
+                        self.main_window,
+                        "Jira",
+                        "Не удалось обновить некоторые источники:\n" + "\n".join(errors),
+                    )
+                else:
+                    QMessageBox.information(
+                        self.main_window,
+                        "Jira",
+                        "Источники успешно обновлены.",
+                    )
+
+            QTimer.singleShot(0, notify)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _setup_application_icon(self) -> None:
         """Установить иконку приложения из ресурсов."""
@@ -459,14 +498,23 @@ class Application:
             )
             return {}
 
+        dialog_state: dict[str, object] = {"dialog": None, "refreshed": False}
+
+        def on_refresh_success() -> None:
+            dialog_state["refreshed"] = True
+            dialog = dialog_state.get("dialog")
+            if dialog is None:
+                return
+            if not dialog.isVisible():
+                return
+            QTimer.singleShot(0, dialog.clear_cache_notice)
+
         try:
-            issues, note = self.jira_issues_service.get_issues_for_source(source)
-        except TimeoutError:
-            QMessageBox.warning(
-                self.main_window,
-                "Ошибка Jira",
-                "Не удалось получить задачи Jira по таймауту.",
+            issues, used_cache_after_timeout = self.jira_issues_service.get_issues_for_source(
+                source,
+                on_refresh_success=on_refresh_success,
             )
+        except TimeoutError:
             return None
         except JiraIssuesError as exc:
             QMessageBox.warning(self.main_window, "Ошибка Jira", str(exc))
@@ -474,9 +522,6 @@ class Application:
         except Exception as exc:
             QMessageBox.warning(self.main_window, "Ошибка Jira", str(exc))
             return None
-
-        if note:
-            QMessageBox.information(self.main_window, "Jira", note)
 
         if not issues:
             QMessageBox.warning(
@@ -489,7 +534,14 @@ class Application:
         if len(issues) == 1:
             selected = issues[0]
         else:
-            dialog = IssueDialog(issues, parent=self.main_window)
+            cache_notice = ""
+            if used_cache_after_timeout and not dialog_state["refreshed"]:
+                cache_notice = (
+                    "Данные получены из кэша из-за превышения таймаута. "
+                    "Выполняется повторная попытка обновления источника."
+                )
+            dialog = IssueDialog(issues, parent=self.main_window, cache_notice=cache_notice)
+            dialog_state["dialog"] = dialog
             if dialog.exec() != IssueDialog.Accepted:
                 return None
             selected = dialog.get_selected_issue()

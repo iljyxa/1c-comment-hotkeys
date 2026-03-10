@@ -7,7 +7,7 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from core.jira_issues_cache import JiraIssuesCache
 from core.jira_sources_repository import JiraSource
@@ -24,41 +24,55 @@ class JiraIssuesService:
 
     def __init__(self, cache: JiraIssuesCache):
         self.cache = cache
-        self.cache_ttl_seconds = 180
         self.max_issues = 20
         self._refresh_in_progress: set[str] = set()
         self._refresh_lock = threading.Lock()
 
-    def get_issues_for_source(self, source: JiraSource) -> Tuple[List[Dict[str, str]], str]:
+    def get_issues_for_source(
+        self,
+        source: JiraSource,
+        on_refresh_success: Optional[Callable[[], None]] = None,
+    ) -> Tuple[List[Dict[str, str]], bool]:
         """Получить задачи по источнику с учетом стратегии таймаутов.
 
         Returns:
-            Кортеж: `(список_задач, уведомление_для_UI)`.
+            Кортеж: `(список_задач, данные_из_кэша_после_таймаута)`.
         """
-        fresh = self.cache.get_fresh(source.name, self.cache_ttl_seconds)
+        ttl_seconds = self._resolve_ttl_seconds(source)
+        timeout_seconds = self._resolve_timeout_seconds(source)
+        fresh = self._get_cached_fresh(source, ttl_seconds)
         if fresh:
-            return fresh, ""
+            return fresh, False
 
         try:
-            issues = self._fetch(source, timeout_seconds=2)
-            self.cache.update(source.name, issues)
-            return issues, ""
+            issues = self._fetch(source, timeout_seconds=timeout_seconds)
+            self._update_cache_if_enabled(source, ttl_seconds, issues)
+            return issues, False
         except TimeoutError:
-            stale = self.cache.get_any(source.name)
+            stale = self.cache.get_any(source.name) if ttl_seconds != 0 else []
             if stale:
-                self._start_background_refresh(source)
-                return stale, (
-                    "Получение задач заняло слишком много времени. "
-                    "Показаны кэшированные данные, обновление выполняется в фоне."
-                )
+                self._start_background_refresh(source, timeout_seconds, on_refresh_success)
+                return stale, True
 
-            issues = self._fetch(source, timeout_seconds=5)
-            self.cache.update(source.name, issues)
-            return issues, ""
+            issues = self._fetch(source, timeout_seconds=timeout_seconds)
+            self._update_cache_if_enabled(source, ttl_seconds, issues)
+            return issues, False
         except Exception as exc:
             raise JiraIssuesError(str(exc)) from exc
 
-    def _start_background_refresh(self, source: JiraSource) -> None:
+    def refresh_source(self, source: JiraSource) -> None:
+        """Принудительно обновить кэш по источнику."""
+        ttl_seconds = self._resolve_ttl_seconds(source)
+        timeout_seconds = self._resolve_timeout_seconds(source)
+        issues = self._fetch(source, timeout_seconds=timeout_seconds)
+        self._update_cache_if_enabled(source, ttl_seconds, issues)
+
+    def _start_background_refresh(
+        self,
+        source: JiraSource,
+        timeout_seconds: int,
+        on_success: Optional[Callable[[], None]] = None,
+    ) -> None:
         source_name = source.name
         with self._refresh_lock:
             if source_name in self._refresh_in_progress:
@@ -67,9 +81,15 @@ class JiraIssuesService:
 
         def worker() -> None:
             try:
-                issues = self._fetch(source, timeout_seconds=30)
-                self.cache.update(source.name, issues)
+                ttl_seconds = self._resolve_ttl_seconds(source)
+                issues = self._fetch(source, timeout_seconds=timeout_seconds)
+                self._update_cache_if_enabled(source, ttl_seconds, issues)
                 logger.info("Фоновое обновление кэша Jira завершено для источника: %s", source.name)
+                if on_success:
+                    try:
+                        on_success()
+                    except Exception as exc:
+                        logger.debug("Ошибка callback обновления кэша: %s", exc)
             except Exception as exc:
                 logger.warning(
                     "Фоновое обновление кэша Jira завершилось ошибкой для источника '%s': %s",
@@ -81,6 +101,43 @@ class JiraIssuesService:
                     self._refresh_in_progress.discard(source_name)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    @staticmethod
+    def _resolve_timeout_seconds(source: JiraSource) -> int:
+        try:
+            value = int(getattr(source, "timeout_seconds", 2))
+        except Exception:
+            value = 2
+        return max(1, value)
+
+    @staticmethod
+    def _resolve_ttl_seconds(source: JiraSource) -> int:
+        try:
+            ttl_minutes = int(getattr(source, "ttl_minutes", 5))
+        except Exception:
+            ttl_minutes = 5
+        if ttl_minutes == -1:
+            return -1
+        if ttl_minutes <= 0:
+            return 0
+        return ttl_minutes * 60
+
+    def _get_cached_fresh(self, source: JiraSource, ttl_seconds: int) -> List[Dict[str, str]]:
+        if ttl_seconds == 0:
+            return []
+        if ttl_seconds == -1:
+            return self.cache.get_any(source.name)
+        return self.cache.get_fresh(source.name, ttl_seconds)
+
+    def _update_cache_if_enabled(
+        self,
+        source: JiraSource,
+        ttl_seconds: int,
+        issues: List[Dict[str, str]],
+    ) -> None:
+        if ttl_seconds == 0:
+            return
+        self.cache.update(source.name, issues)
 
     def _fetch(self, source: JiraSource, timeout_seconds: int) -> List[Dict[str, str]]:
         jql = self._extract_jql(source.url)

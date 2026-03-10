@@ -18,16 +18,26 @@ class JiraSource:
     name: str
     url: str
     token: str
+    ttl_minutes: int = 5
+    timeout_seconds: int = 2
 
     def to_dict(self) -> dict:
         return asdict(self)
 
     @staticmethod
     def from_dict(data: dict) -> "JiraSource":
+        def _safe_int(value: object, fallback: int) -> int:
+            try:
+                return int(value)
+            except Exception:
+                return fallback
+
         return JiraSource(
             name=str(data.get("name", "")).strip(),
             url=str(data.get("url", "")).strip(),
             token=str(data.get("token", "")).strip(),
+            ttl_minutes=_safe_int(data.get("ttl_minutes", 5), 5),
+            timeout_seconds=_safe_int(data.get("timeout_seconds", 2), 2),
         )
 
 

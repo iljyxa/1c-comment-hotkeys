@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QPushButton, QTableWidget, QTableWidgetItem, QMessageBox,
     QDialog, QFormLayout, QLineEdit, QTextEdit, QComboBox,
     QLabel, QSystemTrayIcon, QMenu, QApplication, QStyle,
-    QGroupBox, QCheckBox, QHeaderView
+    QGroupBox, QCheckBox, QHeaderView, QSpinBox
 )
 from PySide6.QtCore import Qt, Signal, QEvent, QUrl
 from PySide6.QtGui import QAction, QIcon, QKeyEvent, QDesktopServices
@@ -263,6 +263,11 @@ class CommentEditDialog(QDialog):
 class JiraSourcesDialog(QDialog):
     """Диалог редактирования источников Jira в таблице."""
 
+    _TTL_MIN = -1
+    _TTL_MAX = 43200
+    _TIMEOUT_MIN = 1
+    _TIMEOUT_MAX = 120
+
     def __init__(self, sources: list[JiraSource], parent=None):
         super().__init__(parent)
         self.setWindowTitle("Источники Jira")
@@ -273,14 +278,18 @@ class JiraSourcesDialog(QDialog):
         self.setLayout(layout)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["Название", "Ссылка", "Токен"])
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(
+            ["Название", "Ссылка", "Токен", "TTL (мин)", "Таймаут (сек)"]
+        )
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setEditTriggers(QTableWidget.AllEditTriggers)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.Stretch)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
         header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         layout.addWidget(self.table)
 
         button_layout = QHBoxLayout()
@@ -302,12 +311,28 @@ class JiraSourcesDialog(QDialog):
 
         self._load_sources(sources)
 
+    def _create_ttl_spinbox(self, value: int) -> QSpinBox:
+        spin = QSpinBox()
+        spin.setRange(self._TTL_MIN, self._TTL_MAX)
+        spin.setValue(value)
+        spin.setToolTip("TTL в минутах: 0 - без кэша, -1 - кэш без срока")
+        return spin
+
+    def _create_timeout_spinbox(self, value: int) -> QSpinBox:
+        spin = QSpinBox()
+        spin.setRange(self._TIMEOUT_MIN, self._TIMEOUT_MAX)
+        spin.setValue(value)
+        spin.setToolTip("Таймаут запроса в секундах (минимум 1)")
+        return spin
+
     def _load_sources(self, sources: list[JiraSource]) -> None:
         self.table.setRowCount(len(sources))
         for row, source in enumerate(sources):
             self.table.setItem(row, 0, QTableWidgetItem(source.name))
             self.table.setItem(row, 1, QTableWidgetItem(source.url))
             self.table.setItem(row, 2, QTableWidgetItem(source.token))
+            self.table.setCellWidget(row, 3, self._create_ttl_spinbox(source.ttl_minutes))
+            self.table.setCellWidget(row, 4, self._create_timeout_spinbox(source.timeout_seconds))
 
     def _on_add_clicked(self) -> None:
         row = self.table.rowCount()
@@ -315,6 +340,8 @@ class JiraSourcesDialog(QDialog):
         self.table.setItem(row, 0, QTableWidgetItem(""))
         self.table.setItem(row, 1, QTableWidgetItem(""))
         self.table.setItem(row, 2, QTableWidgetItem(""))
+        self.table.setCellWidget(row, 3, self._create_ttl_spinbox(5))
+        self.table.setCellWidget(row, 4, self._create_timeout_spinbox(2))
         self.table.setCurrentCell(row, 0)
         self.table.editItem(self.table.item(row, 0))
 
@@ -331,10 +358,22 @@ class JiraSourcesDialog(QDialog):
             name_item = self.table.item(row, 0)
             url_item = self.table.item(row, 1)
             token_item = self.table.item(row, 2)
+            ttl_widget = self.table.cellWidget(row, 3)
+            timeout_widget = self.table.cellWidget(row, 4)
 
             name = (name_item.text() if name_item else "").strip()
             url = (url_item.text() if url_item else "").strip()
             token = (token_item.text() if token_item else "").strip()
+            ttl_minutes = (
+                int(ttl_widget.value())
+                if isinstance(ttl_widget, QSpinBox)
+                else 5
+            )
+            timeout_seconds = (
+                int(timeout_widget.value())
+                if isinstance(timeout_widget, QSpinBox)
+                else 2
+            )
 
             if not any([name, url, token]):
                 continue
@@ -342,8 +381,24 @@ class JiraSourcesDialog(QDialog):
                 raise ValueError(f"Строка {row + 1}: заполните название, ссылку и токен")
             if name in names_seen:
                 raise ValueError(f"Дубликат названия источника: {name}")
+            if ttl_minutes < self._TTL_MIN or ttl_minutes > self._TTL_MAX:
+                raise ValueError(
+                    f"Строка {row + 1}: TTL должен быть от {self._TTL_MIN} до {self._TTL_MAX}"
+                )
+            if timeout_seconds < self._TIMEOUT_MIN or timeout_seconds > self._TIMEOUT_MAX:
+                raise ValueError(
+                    f"Строка {row + 1}: Таймаут должен быть от {self._TIMEOUT_MIN} до {self._TIMEOUT_MAX}"
+                )
             names_seen.add(name)
-            sources.append(JiraSource(name=name, url=url, token=token))
+            sources.append(
+                JiraSource(
+                    name=name,
+                    url=url,
+                    token=token,
+                    ttl_minutes=ttl_minutes,
+                    timeout_seconds=timeout_seconds,
+                )
+            )
         return sources
 
 class MainWindow(QMainWindow):
@@ -359,6 +414,7 @@ class MainWindow(QMainWindow):
         jira_sources_repository: JiraSourcesRepository,
         hotkey_change_handler: Callable[[str], tuple[bool, str]],
         log_to_file_change_handler: Callable[[bool], None],
+        refresh_sources_handler: Callable[[], None],
         exit_handler: Callable[[], None],
     ):
         """Инициализировать главное окно.
@@ -373,6 +429,7 @@ class MainWindow(QMainWindow):
         self.jira_sources_repository = jira_sources_repository
         self.hotkey_change_handler = hotkey_change_handler
         self.log_to_file_change_handler = log_to_file_change_handler
+        self.refresh_sources_handler = refresh_sources_handler
         self.exit_handler = exit_handler
         self._allow_close = False
         self._capturing_hotkey = False
@@ -499,6 +556,10 @@ class MainWindow(QMainWindow):
         show_action = QAction("Открыть", self)
         show_action.triggered.connect(self.show_window)
         tray_menu.addAction(show_action)
+
+        refresh_action = QAction("Обновить источники", self)
+        refresh_action.triggered.connect(self._on_refresh_sources_clicked)
+        tray_menu.addAction(refresh_action)
         
         quit_action = QAction("Выход", self)
         quit_action.triggered.connect(self.exit_handler)
@@ -525,6 +586,10 @@ class MainWindow(QMainWindow):
         self.show()
         self.raise_()
         self.activateWindow()
+
+    def _on_refresh_sources_clicked(self) -> None:
+        """Запросить обновление всех источников."""
+        self.refresh_sources_handler()
     
     def _load_comments(self) -> None:
         """Загрузить комментарии в таблицу."""

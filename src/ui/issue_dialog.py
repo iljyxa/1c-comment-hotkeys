@@ -20,11 +20,17 @@ from PySide6.QtWidgets import (
 class IssueDialog(QDialog):
     """Диалог выбора задачи Jira из списка."""
 
-    def __init__(self, issues: List[Dict[str, str]], parent=None):
+    def __init__(
+        self,
+        issues: List[Dict[str, str]],
+        parent=None,
+        cache_notice: Optional[str] = None,
+    ):
         super().__init__(parent)
         self.issues = issues
         self.filtered = issues.copy()
         self.selected_issue: Optional[Dict[str, str]] = None
+        self._cache_notice_text = cache_notice or ""
         self._setup_ui()
         self._populate()
 
@@ -88,6 +94,11 @@ class IssueDialog(QDialog):
         self.list_widget.itemDoubleClicked.connect(self._on_double_clicked)
         layout.addWidget(self.list_widget)
 
+        self.cache_notice = QLabel()
+        self.cache_notice.setWordWrap(True)
+        self.cache_notice.setVisible(False)
+        layout.addWidget(self.cache_notice)
+
         buttons = QHBoxLayout()
         ok = QPushButton("OK")
         ok.clicked.connect(self._on_ok_clicked)
@@ -99,6 +110,8 @@ class IssueDialog(QDialog):
         layout.addLayout(buttons)
 
         self.list_widget.setFocus()
+        if self._cache_notice_text:
+            self.show_cache_notice(self._cache_notice_text)
 
     def _populate(self) -> None:
         self.list_widget.clear()
@@ -140,3 +153,11 @@ class IssueDialog(QDialog):
 
     def get_selected_issue(self) -> Optional[Dict[str, str]]:
         return self.selected_issue
+
+    def show_cache_notice(self, text: str) -> None:
+        self.cache_notice.setText(text)
+        self.cache_notice.setVisible(True)
+
+    def clear_cache_notice(self) -> None:
+        self.cache_notice.clear()
+        self.cache_notice.setVisible(False)
