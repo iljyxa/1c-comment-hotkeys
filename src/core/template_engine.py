@@ -361,10 +361,14 @@ class TemplateEngine:
                 line_ending = "\r"
                 line = line[:-1]
 
-            if line:
-                result.append(f"{arg}{line}{line_ending}")
-            else:
+            if not line:
                 result.append(line_ending)
+                continue
+
+            match = re.match(r"^[ \t]*", line)
+            leading = match.group(0) if match else ""
+            rest = line[len(leading):]
+            result.append(f"{leading}{arg}{rest}{line_ending}")
 
         return "".join(result)
 
