@@ -189,6 +189,19 @@ jobs:
     runs-on: windows-latest
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Move tag v0.0 to current commit
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -fa v0.0 -m "Автообновляемый предрелиз"
+          git push origin refs/tags/v0.0 --force
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -198,6 +211,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v0.0
+          target_commitish: ${{ github.sha }}
           name: Предрелизная сборка v0.0
           prerelease: true
           make_latest: false
