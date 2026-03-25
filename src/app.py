@@ -553,7 +553,7 @@ class Application:
             if not selected:
                 return None
 
-        selected_key = selected.get("key", "")
+        selected_key = self._extract_issue_key(selected)
         if selected_key:
             self.jira_last_issue_repository.set_last_issue_key(source.name, selected_key)
 
@@ -572,12 +572,18 @@ class Application:
             return issues
 
         for index, issue in enumerate(issues):
-            if (issue.get("key", "") or "").strip() != last_key:
+            if self._extract_issue_key(issue) != last_key:
                 continue
             if index == 0:
                 return issues
             return [issues[index], *issues[:index], *issues[index + 1 :]]
         return issues
+
+    @staticmethod
+    def _extract_issue_key(issue: dict[str, str] | None) -> str:
+        if not issue:
+            return ""
+        return str(issue.get("key") or issue.get("issue_key") or "").strip()
     
     def run(self) -> int:
         """Запустить приложение.

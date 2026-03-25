@@ -116,7 +116,8 @@ class IssueDialog(QDialog):
     def _populate(self) -> None:
         self.list_widget.clear()
         for issue in self.filtered:
-            title = f"{issue.get('key', '')} - {issue.get('summary', '')}".strip()
+            issue_key = issue.get("key") or issue.get("issue_key") or ""
+            title = f"{issue_key} - {issue.get('summary', '')}".strip()
             item = QListWidgetItem(title)
             item.setData(Qt.UserRole, issue)
             self.list_widget.addItem(item)
@@ -131,7 +132,7 @@ class IssueDialog(QDialog):
             self.filtered = [
                 issue
                 for issue in self.issues
-                if query in issue.get("key", "").lower()
+                if query in str(issue.get("key") or issue.get("issue_key") or "").lower()
                 or query in issue.get("summary", "").lower()
             ]
         self._populate()

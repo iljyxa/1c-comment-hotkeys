@@ -40,21 +40,21 @@ class JiraIssuesService:
         """
         ttl_seconds = self._resolve_ttl_seconds(source)
         timeout_seconds = self._resolve_timeout_seconds(source)
-        fresh = self._get_cached_fresh(source, ttl_seconds)
+        fresh = self._normalize_issues(self._get_cached_fresh(source, ttl_seconds))
         if fresh:
             return fresh, False
 
         try:
-            issues = self._fetch(source, timeout_seconds=timeout_seconds)
+            issues = self._normalize_issues(self._fetch(source, timeout_seconds=timeout_seconds))
             self._update_cache_if_enabled(source, ttl_seconds, issues)
             return issues, False
         except TimeoutError:
-            stale = self.cache.get_any(source.name) if ttl_seconds != 0 else []
+            stale = self._normalize_issues(self.cache.get_any(source.name) if ttl_seconds != 0 else [])
             if stale:
                 self._start_background_refresh(source, timeout_seconds, on_refresh_success)
                 return stale, True
 
-            issues = self._fetch(source, timeout_seconds=timeout_seconds)
+            issues = self._normalize_issues(self._fetch(source, timeout_seconds=timeout_seconds))
             self._update_cache_if_enabled(source, ttl_seconds, issues)
             return issues, False
         except Exception as exc:
@@ -64,7 +64,7 @@ class JiraIssuesService:
         """Принудительно обновить кэш по источнику."""
         ttl_seconds = self._resolve_ttl_seconds(source)
         timeout_seconds = self._resolve_timeout_seconds(source)
-        issues = self._fetch(source, timeout_seconds=timeout_seconds)
+        issues = self._normalize_issues(self._fetch(source, timeout_seconds=timeout_seconds))
         self._update_cache_if_enabled(source, ttl_seconds, issues)
 
     def _start_background_refresh(
@@ -82,7 +82,7 @@ class JiraIssuesService:
         def worker() -> None:
             try:
                 ttl_seconds = self._resolve_ttl_seconds(source)
-                issues = self._fetch(source, timeout_seconds=timeout_seconds)
+                issues = self._normalize_issues(self._fetch(source, timeout_seconds=timeout_seconds))
                 self._update_cache_if_enabled(source, ttl_seconds, issues)
                 logger.info("Фоновое обновление кэша Jira завершено для источника: %s", source.name)
                 if on_success:
@@ -236,6 +236,17 @@ class JiraIssuesService:
             len(issues),
         )
         return issues
+
+    @staticmethod
+    def _normalize_issues(issues: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        normalized: List[Dict[str, str]] = []
+        for issue in issues or []:
+            key = str(issue.get("key") or issue.get("issue_key") or "").strip()
+            summary = str(issue.get("summary", "")).strip()
+            if not key:
+                continue
+            normalized.append({"key": key, "summary": summary})
+        return normalized
 
     @staticmethod
     def _extract_base_url(source_url: str) -> str:
