@@ -348,6 +348,23 @@ class TemplateEngine:
         if not lines:
             return value
 
+        base_indent_width: Optional[int] = None
+        for raw_line in lines:
+            line, _ = TemplateEngine._extract_line_ending(raw_line)
+            if not line:
+                continue
+            match = re.match(r"^[ \t]*", line)
+            leading = match.group(0) if match else ""
+            if len(leading) == len(line):
+                continue
+            width = TemplateEngine._indent_width(leading)
+            if base_indent_width is None or width < base_indent_width:
+                base_indent_width = width
+                if base_indent_width == 0:
+                    break
+        if base_indent_width is None:
+            base_indent_width = 0
+
         result = []
         for raw_line in lines:
             line, line_ending = TemplateEngine._extract_line_ending(raw_line)
@@ -355,8 +372,8 @@ class TemplateEngine:
                 result.append(line_ending)
                 continue
 
-            # Префикс добавляется перед исходной строкой без изменения её содержимого.
-            result.append(f"{arg}{line}{line_ending}")
+            normalized_line = TemplateEngine._trim_leading_ws_by_width(line, base_indent_width)
+            result.append(f"{arg}{normalized_line}{line_ending}")
 
         return "".join(result)
 
@@ -369,6 +386,36 @@ class TemplateEngine:
         if line.endswith("\r"):
             return line[:-1], "\r"
         return line, ""
+
+    @staticmethod
+    def _indent_width(prefix: str) -> int:
+        width = 0
+        for ch in prefix:
+            if ch == "\t":
+                width += 4
+            elif ch == " ":
+                width += 1
+            else:
+                break
+        return width
+
+    @staticmethod
+    def _trim_leading_ws_by_width(line: str, width: int) -> str:
+        if width <= 0 or not line:
+            return line
+        consumed_width = 0
+        cut_pos = 0
+        for idx, ch in enumerate(line):
+            if ch == "\t":
+                consumed_width += 4
+            elif ch == " ":
+                consumed_width += 1
+            else:
+                break
+            cut_pos = idx + 1
+            if consumed_width >= width:
+                return line[cut_pos:]
+        return line[cut_pos:]
 
     def _block_line_limit(self, value: str, args: tuple[tuple[str, str], ...]) -> str:
         options = {k: v for k, v in args}
