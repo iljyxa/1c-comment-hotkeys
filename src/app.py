@@ -21,6 +21,7 @@ from core.settings_repository import SettingsRepository
 from core.jira_sources_repository import JiraSourcesRepository
 from core.jira_issues_cache import JiraIssuesCache
 from core.jira_issues_service import JiraIssuesService, JiraIssuesError
+from core.jira_last_issue_repository import JiraLastIssueRepository
 from ui.main_window import MainWindow
 from ui.comment_dialog import CommentDialog
 from ui.issue_dialog import IssueDialog
@@ -84,6 +85,8 @@ class Application:
         self.jira_issues_cache = JiraIssuesCache(config_dir)
         self.jira_issues_cache.load()
         self.jira_issues_service = JiraIssuesService(self.jira_issues_cache)
+        self.jira_last_issue_repository = JiraLastIssueRepository(config_dir)
+        self.jira_last_issue_repository.load()
         
         # Инициализация UI
         self.main_window = MainWindow(
@@ -531,6 +534,8 @@ class Application:
             )
             return None
 
+        issues = self._promote_last_used_issue(source_name=source.name, issues=issues)
+
         if len(issues) == 1:
             selected = issues[0]
         else:
@@ -548,10 +553,31 @@ class Application:
             if not selected:
                 return None
 
+        selected_key = selected.get("key", "")
+        if selected_key:
+            self.jira_last_issue_repository.set_last_issue_key(source.name, selected_key)
+
         return {
-            "issue_key": selected.get("key", ""),
+            "issue_key": selected_key,
             "issue_summary": selected.get("summary", ""),
         }
+
+    def _promote_last_used_issue(self, source_name: str, issues: list[dict[str, str]]) -> list[dict[str, str]]:
+        """Поднять последнюю использованную задачу источника на первую позицию."""
+        if not issues:
+            return issues
+
+        last_key = self.jira_last_issue_repository.get_last_issue_key(source_name)
+        if not last_key:
+            return issues
+
+        for index, issue in enumerate(issues):
+            if (issue.get("key", "") or "").strip() != last_key:
+                continue
+            if index == 0:
+                return issues
+            return [issues[index], *issues[:index], *issues[index + 1 :]]
+        return issues
     
     def run(self) -> int:
         """Запустить приложение.
