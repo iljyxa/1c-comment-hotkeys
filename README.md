@@ -78,7 +78,7 @@ python src/app.py
 
 Конфигурационные файлы хранятся в:
 - **Windows (обычная установка Python):** `%APPDATA%\1CCommentHotkeys\`
-- **Windows (Python из Microsoft Store):** `%LOCALAPPDATA%\Packages\PythonSoftwareFoundation.Python.*\LocalCache\Roaming\1CCommentHotkeys\`
+- **Windows (Python из Microsoft Store):** `%APPDATA%\1CCommentHotkeys\` (при первом запуске выполняется перенос из legacy-пути в `LocalCache\Roaming`, если данные там уже есть)
 
 ### Файл config.json
 
