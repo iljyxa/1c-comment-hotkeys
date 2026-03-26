@@ -278,9 +278,9 @@ class JiraSourcesDialog(QDialog):
         self.setLayout(layout)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(5)
+        self.table.setColumnCount(6)
         self.table.setHorizontalHeaderLabels(
-            ["Название", "Ссылка", "Токен", "TTL (мин)", "Таймаут (сек)"]
+            ["Название", "Ссылка", "Токен", "TTL (мин)", "Таймаут (сек)", "Автообновление"]
         )
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setEditTriggers(QTableWidget.AllEditTriggers)
@@ -290,6 +290,7 @@ class JiraSourcesDialog(QDialog):
         header.setSectionResizeMode(2, QHeaderView.Stretch)
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
         layout.addWidget(self.table)
 
         button_layout = QHBoxLayout()
@@ -325,6 +326,16 @@ class JiraSourcesDialog(QDialog):
         spin.setToolTip("Таймаут запроса в секундах (минимум 1)")
         return spin
 
+    @staticmethod
+    def _create_auto_refresh_checkbox(enabled: bool) -> QCheckBox:
+        checkbox = QCheckBox()
+        checkbox.setChecked(bool(enabled))
+        checkbox.setToolTip(
+            "Включить периодическое автообновление кэша при устаревании "
+            "(работает только при TTL > 0)"
+        )
+        return checkbox
+
     def _load_sources(self, sources: list[JiraSource]) -> None:
         self.table.setRowCount(len(sources))
         for row, source in enumerate(sources):
@@ -333,6 +344,7 @@ class JiraSourcesDialog(QDialog):
             self.table.setItem(row, 2, QTableWidgetItem(source.token))
             self.table.setCellWidget(row, 3, self._create_ttl_spinbox(source.ttl_minutes))
             self.table.setCellWidget(row, 4, self._create_timeout_spinbox(source.timeout_seconds))
+            self.table.setCellWidget(row, 5, self._create_auto_refresh_checkbox(source.auto_refresh))
 
     def _on_add_clicked(self) -> None:
         row = self.table.rowCount()
@@ -342,6 +354,7 @@ class JiraSourcesDialog(QDialog):
         self.table.setItem(row, 2, QTableWidgetItem(""))
         self.table.setCellWidget(row, 3, self._create_ttl_spinbox(5))
         self.table.setCellWidget(row, 4, self._create_timeout_spinbox(2))
+        self.table.setCellWidget(row, 5, self._create_auto_refresh_checkbox(False))
         self.table.setCurrentCell(row, 0)
         self.table.editItem(self.table.item(row, 0))
 
@@ -360,6 +373,7 @@ class JiraSourcesDialog(QDialog):
             token_item = self.table.item(row, 2)
             ttl_widget = self.table.cellWidget(row, 3)
             timeout_widget = self.table.cellWidget(row, 4)
+            auto_refresh_widget = self.table.cellWidget(row, 5)
 
             name = (name_item.text() if name_item else "").strip()
             url = (url_item.text() if url_item else "").strip()
@@ -373,6 +387,11 @@ class JiraSourcesDialog(QDialog):
                 int(timeout_widget.value())
                 if isinstance(timeout_widget, QSpinBox)
                 else 2
+            )
+            auto_refresh = (
+                bool(auto_refresh_widget.isChecked())
+                if isinstance(auto_refresh_widget, QCheckBox)
+                else False
             )
 
             if not any([name, url, token]):
@@ -397,6 +416,7 @@ class JiraSourcesDialog(QDialog):
                     token=token,
                     ttl_minutes=ttl_minutes,
                     timeout_seconds=timeout_seconds,
+                    auto_refresh=auto_refresh,
                 )
             )
         return sources

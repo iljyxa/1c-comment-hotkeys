@@ -1,8 +1,9 @@
 """Диалог выбора задачи Jira."""
 
-from typing import Dict, List, Optional
+import threading
+from typing import Callable, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
     QApplication,
@@ -12,6 +13,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
 )
@@ -25,12 +27,15 @@ class IssueDialog(QDialog):
         issues: List[Dict[str, str]],
         parent=None,
         cache_notice: Optional[str] = None,
+        refresh_handler: Optional[Callable[[], Tuple[List[Dict[str, str]], str]]] = None,
     ):
         super().__init__(parent)
         self.issues = issues
         self.filtered = issues.copy()
         self.selected_issue: Optional[Dict[str, str]] = None
         self._cache_notice_text = cache_notice or ""
+        self._refresh_handler = refresh_handler
+        self._refresh_in_progress = False
         self._setup_ui()
         self._populate()
 
@@ -100,10 +105,14 @@ class IssueDialog(QDialog):
         layout.addWidget(self.cache_notice)
 
         buttons = QHBoxLayout()
+        self.refresh_button = QPushButton("Обновить")
+        self.refresh_button.clicked.connect(self._on_refresh_clicked)
+        self.refresh_button.setEnabled(self._refresh_handler is not None)
         ok = QPushButton("OK")
         ok.clicked.connect(self._on_ok_clicked)
         cancel = QPushButton("Отмена")
         cancel.clicked.connect(self.reject)
+        buttons.addWidget(self.refresh_button)
         buttons.addStretch()
         buttons.addWidget(ok)
         buttons.addWidget(cancel)
@@ -151,6 +160,59 @@ class IssueDialog(QDialog):
         if issue:
             self.selected_issue = issue
             self.accept()
+
+    def _on_refresh_clicked(self) -> None:
+        if self._refresh_handler is None or self._refresh_in_progress:
+            return
+        self._refresh_in_progress = True
+        self.refresh_button.setEnabled(False)
+        self.refresh_button.setText("Обновление...")
+
+        def worker() -> None:
+            try:
+                refreshed_issues, cache_notice = self._refresh_handler()
+                QTimer.singleShot(
+                    0,
+                    lambda: self._on_refresh_finished(
+                        refreshed_issues=refreshed_issues,
+                        cache_notice=cache_notice,
+                        error_text="",
+                    ),
+                )
+            except Exception as exc:
+                QTimer.singleShot(
+                    0,
+                    lambda: self._on_refresh_finished(
+                        refreshed_issues=None,
+                        cache_notice="",
+                        error_text=str(exc),
+                    ),
+                )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_refresh_finished(
+        self,
+        refreshed_issues: Optional[List[Dict[str, str]]],
+        cache_notice: str,
+        error_text: str,
+    ) -> None:
+        self._refresh_in_progress = False
+        self.refresh_button.setEnabled(True)
+        self.refresh_button.setText("Обновить")
+
+        if error_text:
+            QMessageBox.warning(self, "Ошибка Jira", error_text)
+            return
+        if refreshed_issues is None:
+            return
+
+        self.issues = refreshed_issues
+        self._on_search_changed(self.search.text())
+        if cache_notice:
+            self.show_cache_notice(cache_notice)
+        else:
+            self.clear_cache_notice()
 
     def get_selected_issue(self) -> Optional[Dict[str, str]]:
         return self.selected_issue

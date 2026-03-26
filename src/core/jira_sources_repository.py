@@ -20,6 +20,7 @@ class JiraSource:
     token: str
     ttl_minutes: int = 5
     timeout_seconds: int = 2
+    auto_refresh: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -32,12 +33,26 @@ class JiraSource:
             except Exception:
                 return fallback
 
+        def _safe_bool(value: object, fallback: bool) -> bool:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return bool(value)
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in {"1", "true", "yes", "on"}:
+                    return True
+                if normalized in {"0", "false", "no", "off"}:
+                    return False
+            return fallback
+
         return JiraSource(
             name=str(data.get("name", "")).strip(),
             url=str(data.get("url", "")).strip(),
             token=str(data.get("token", "")).strip(),
             ttl_minutes=_safe_int(data.get("ttl_minutes", 5), 5),
             timeout_seconds=_safe_int(data.get("timeout_seconds", 2), 2),
+            auto_refresh=_safe_bool(data.get("auto_refresh", False), False),
         )
 
 

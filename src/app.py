@@ -104,9 +104,17 @@ class Application:
         self._hotkey_capture_in_progress = False
         self._hotkey_cooldown_until = 0.0
         self._target_window_handle = None
+        self._user_activity_lock = threading.Lock()
+        self._last_user_activity_monotonic = time.monotonic()
+        self._auto_refresh_idle_timeout_seconds = 60 * 60
+        self._auto_refresh_poll_interval_seconds = 30
+        self._auto_refresh_paused_by_idle = False
+        self._auto_refresh_stop_event = threading.Event()
         
         # Регистрация горячих клавиш
         self._setup_hotkeys()
+        self._warmup_jira_cache()
+        self._start_auto_refresh_scheduler()
         
         logger.info("Приложение инициализировано")
 
@@ -137,6 +145,7 @@ class Application:
 
     def _refresh_all_sources(self) -> None:
         """Обновить все источники Jira в фоне."""
+        self._mark_user_activity("manual_refresh_all_sources")
         sources = self.jira_sources_repository.get_all()
         if not sources:
             QMessageBox.information(
@@ -169,6 +178,118 @@ class Application:
                     )
 
             QTimer.singleShot(0, notify)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _start_auto_refresh_scheduler(self) -> None:
+        """Запустить планировщик автообновления Jira-кэша."""
+        thread = threading.Thread(target=self._auto_refresh_worker, daemon=True)
+        thread.start()
+
+    def _auto_refresh_worker(self) -> None:
+        """Периодически обновлять устаревший кэш Jira для автообновляемых источников."""
+        logger.info(
+            "Планировщик автообновления Jira запущен: interval=%ss, idle_timeout=%ss",
+            self._auto_refresh_poll_interval_seconds,
+            self._auto_refresh_idle_timeout_seconds,
+        )
+        while not self._auto_refresh_stop_event.wait(self._auto_refresh_poll_interval_seconds):
+            if self._should_pause_auto_refresh_for_idle():
+                continue
+
+            for source in self.jira_sources_repository.get_all():
+                if self._auto_refresh_stop_event.is_set():
+                    return
+                if not bool(getattr(source, "auto_refresh", False)):
+                    continue
+
+                ttl_seconds = self._resolve_auto_refresh_ttl_seconds(source)
+                if ttl_seconds <= 0:
+                    continue
+
+                if self.jira_issues_cache.get_fresh(source.name, ttl_seconds):
+                    continue
+
+                try:
+                    self.jira_issues_service.get_issues_for_source(source)
+                except TimeoutError:
+                    logger.debug(
+                        "Автообновление Jira: таймаут источника '%s'",
+                        source.name,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Автообновление Jira завершилось ошибкой для источника '%s': %s",
+                        source.name,
+                        exc,
+                    )
+
+    @staticmethod
+    def _resolve_auto_refresh_ttl_seconds(source) -> int:
+        try:
+            ttl_minutes = int(getattr(source, "ttl_minutes", 0))
+        except Exception:
+            return 0
+        if ttl_minutes <= 0:
+            return 0
+        return ttl_minutes * 60
+
+    def _should_pause_auto_refresh_for_idle(self) -> bool:
+        now = time.monotonic()
+        with self._user_activity_lock:
+            idle_seconds = now - self._last_user_activity_monotonic
+            paused = idle_seconds >= self._auto_refresh_idle_timeout_seconds
+            if paused == self._auto_refresh_paused_by_idle:
+                return paused
+            self._auto_refresh_paused_by_idle = paused
+
+        logger.info(
+            "Автообновление Jira %s из-за активности пользователя: idle=%ds, threshold=%ds",
+            "приостановлено" if paused else "возобновлено",
+            int(idle_seconds),
+            self._auto_refresh_idle_timeout_seconds,
+        )
+        return paused
+
+    def _mark_user_activity(self, reason: str) -> None:
+        now = time.monotonic()
+        with self._user_activity_lock:
+            was_paused = self._auto_refresh_paused_by_idle
+            self._last_user_activity_monotonic = now
+            self._auto_refresh_paused_by_idle = False
+        logger.debug("Активность пользователя: %s", reason)
+        if was_paused:
+            logger.info("Автообновление Jira возобновлено (действие пользователя: %s)", reason)
+
+    def _warmup_jira_cache(self) -> None:
+        """Фоново прогреть Jira-кэш для источников, используемых в комментариях."""
+        source_names = {
+            (getattr(comment, "source", "") or "").strip()
+            for comment in self.repository.get_all()
+            if (getattr(comment, "source", "") or "").strip()
+        }
+        if not source_names:
+            return
+
+        sources = [
+            source
+            for source in self.jira_sources_repository.get_all()
+            if source.name in source_names
+        ]
+        if not sources:
+            return
+
+        def worker() -> None:
+            logger.info("Запущен прогрев Jira-кэша для источников: %d", len(sources))
+            for source in sources:
+                try:
+                    self.jira_issues_service.get_issues_for_source(source)
+                except Exception as exc:
+                    logger.debug(
+                        "Прогрев Jira-кэша завершился ошибкой для источника '%s': %s",
+                        source.name,
+                        exc,
+                    )
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -296,10 +417,12 @@ class Application:
 
     def _on_hotkey_triggered_main_thread(self) -> None:
         """Обработать основную клавишу в главном потоке Qt."""
+        self._mark_user_activity("global_hotkey")
         self._start_capture_flow()
 
     def _on_quick_comment_hotkey_main_thread(self, comment) -> None:
         """Обработать быструю клавишу комментария в главном потоке Qt."""
+        self._mark_user_activity("quick_hotkey")
         self._start_capture_flow(direct_comment=comment)
 
     def _start_capture_flow(self, direct_comment=None) -> None:
@@ -502,6 +625,10 @@ class Application:
             return {}
 
         dialog_state: dict[str, object] = {"dialog": None, "refreshed": False}
+        stale_cache_notice = (
+            "Показаны кэшированные данные. "
+            "Выполняется фоновое обновление источника."
+        )
 
         def on_refresh_success() -> None:
             dialog_state["refreshed"] = True
@@ -513,7 +640,7 @@ class Application:
             QTimer.singleShot(0, dialog.clear_cache_notice)
 
         try:
-            issues, used_cache_after_timeout = self.jira_issues_service.get_issues_for_source(
+            issues, used_cached_fallback = self.jira_issues_service.get_issues_for_source(
                 source,
                 on_refresh_success=on_refresh_success,
             )
@@ -536,16 +663,55 @@ class Application:
 
         issues = self._promote_last_used_issue(source_name=source.name, issues=issues)
 
-        if len(issues) == 1:
+        def refresh_issues_for_dialog() -> tuple[list[dict[str, str]], str]:
+            self._mark_user_activity("issue_dialog_refresh")
+            try:
+                self.jira_issues_service.refresh_source(source)
+                dialog_state["refreshed"] = True
+            except TimeoutError:
+                dialog_state["refreshed"] = False
+            except JiraIssuesError as exc:
+                raise RuntimeError(str(exc)) from exc
+            except Exception as exc:
+                raise RuntimeError(str(exc)) from exc
+
+            try:
+                refreshed_issues, refreshed_from_stale_cache = self.jira_issues_service.get_issues_for_source(
+                    source,
+                    on_refresh_success=on_refresh_success,
+                )
+            except TimeoutError as exc:
+                raise RuntimeError("Таймаут запроса Jira") from exc
+            except JiraIssuesError as exc:
+                raise RuntimeError(str(exc)) from exc
+            except Exception as exc:
+                raise RuntimeError(str(exc)) from exc
+
+            refreshed_issues = self._promote_last_used_issue(
+                source_name=source.name,
+                issues=refreshed_issues,
+            )
+            if not refreshed_issues:
+                raise RuntimeError("По выбранному источнику не найдено задач.")
+
+            notice = ""
+            if refreshed_from_stale_cache and not dialog_state["refreshed"]:
+                notice = stale_cache_notice
+            return refreshed_issues, notice
+
+        must_show_dialog_due_stale_cache = used_cached_fallback and not dialog_state["refreshed"]
+        if len(issues) == 1 and not must_show_dialog_due_stale_cache:
             selected = issues[0]
         else:
             cache_notice = ""
-            if used_cache_after_timeout and not dialog_state["refreshed"]:
-                cache_notice = (
-                    "Данные получены из кэша из-за превышения таймаута. "
-                    "Выполняется повторная попытка обновления источника."
-                )
-            dialog = IssueDialog(issues, parent=self.main_window, cache_notice=cache_notice)
+            if must_show_dialog_due_stale_cache:
+                cache_notice = stale_cache_notice
+            dialog = IssueDialog(
+                issues,
+                parent=self.main_window,
+                cache_notice=cache_notice,
+                refresh_handler=refresh_issues_for_dialog,
+            )
             dialog_state["dialog"] = dialog
             if dialog.exec() != IssueDialog.Accepted:
                 return None
@@ -608,6 +774,7 @@ class Application:
     def cleanup(self) -> None:
         """Освободить ресурсы перед завершением."""
         logger.info("Очистка ресурсов")
+        self._auto_refresh_stop_event.set()
         
         # Снимаем регистрацию горячих клавиш
         self.hotkey_manager.unregister_all()

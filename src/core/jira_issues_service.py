@@ -4,6 +4,7 @@ import json
 import logging
 import socket
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -36,36 +37,73 @@ class JiraIssuesService:
         """Получить задачи по источнику с учетом стратегии таймаутов.
 
         Returns:
-            Кортеж: `(список_задач, данные_из_кэша_после_таймаута)`.
+            Кортеж: `(список_задач, данные_из_устаревшего_кэша_с_фоновым_обновлением)`.
         """
+        started_at = time.perf_counter()
         ttl_seconds = self._resolve_ttl_seconds(source)
         timeout_seconds = self._resolve_timeout_seconds(source)
         fresh = self._normalize_issues(self._get_cached_fresh(source, ttl_seconds))
         if fresh:
+            elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+            logger.info(
+                "Jira cache-hit: источник='%s', ttl=%s, задач=%d, время=%dms",
+                source.name,
+                ttl_seconds,
+                len(fresh),
+                elapsed_ms,
+            )
             return fresh, False
+
+        stale = self._normalize_issues(self.cache.get_any(source.name) if ttl_seconds != 0 else [])
+        if stale:
+            self._start_background_refresh(source, timeout_seconds, on_refresh_success)
+            elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+            logger.info(
+                "Jira stale-cache fallback: источник='%s', ttl=%s, задач=%d, время=%dms",
+                source.name,
+                ttl_seconds,
+                len(stale),
+                elapsed_ms,
+            )
+            return stale, True
 
         try:
             issues = self._normalize_issues(self._fetch(source, timeout_seconds=timeout_seconds))
             self._update_cache_if_enabled(source, ttl_seconds, issues)
+            elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+            logger.info(
+                "Jira live-fetch success: источник='%s', задач=%d, время=%dms",
+                source.name,
+                len(issues),
+                elapsed_ms,
+            )
             return issues, False
         except TimeoutError:
-            stale = self._normalize_issues(self.cache.get_any(source.name) if ttl_seconds != 0 else [])
-            if stale:
-                self._start_background_refresh(source, timeout_seconds, on_refresh_success)
-                return stale, True
-
-            issues = self._normalize_issues(self._fetch(source, timeout_seconds=timeout_seconds))
-            self._update_cache_if_enabled(source, ttl_seconds, issues)
-            return issues, False
+            elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+            logger.warning(
+                "Jira timeout without cache fallback: источник='%s', таймаут=%ss, время=%dms",
+                source.name,
+                timeout_seconds,
+                elapsed_ms,
+            )
+            raise
         except Exception as exc:
             raise JiraIssuesError(str(exc)) from exc
 
     def refresh_source(self, source: JiraSource) -> None:
         """Принудительно обновить кэш по источнику."""
+        started_at = time.perf_counter()
         ttl_seconds = self._resolve_ttl_seconds(source)
         timeout_seconds = self._resolve_timeout_seconds(source)
         issues = self._normalize_issues(self._fetch(source, timeout_seconds=timeout_seconds))
         self._update_cache_if_enabled(source, ttl_seconds, issues)
+        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+        logger.info(
+            "Jira source refresh: источник='%s', задач=%d, время=%dms",
+            source.name,
+            len(issues),
+            elapsed_ms,
+        )
 
     def _start_background_refresh(
         self,
@@ -80,6 +118,7 @@ class JiraIssuesService:
             self._refresh_in_progress.add(source_name)
 
         def worker() -> None:
+            started_at = time.perf_counter()
             try:
                 ttl_seconds = self._resolve_ttl_seconds(source)
                 issues = self._normalize_issues(self._fetch(source, timeout_seconds=timeout_seconds))
@@ -97,6 +136,12 @@ class JiraIssuesService:
                     exc,
                 )
             finally:
+                elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+                logger.info(
+                    "Фоновое обновление Jira завершено: источник='%s', время=%dms",
+                    source.name,
+                    elapsed_ms,
+                )
                 with self._refresh_lock:
                     self._refresh_in_progress.discard(source_name)
 
@@ -140,6 +185,7 @@ class JiraIssuesService:
         self.cache.update(source.name, issues)
 
     def _fetch(self, source: JiraSource, timeout_seconds: int) -> List[Dict[str, str]]:
+        started_at = time.perf_counter()
         jql = self._extract_jql(source.url)
         base = self._extract_base_url(source.url)
         query = urllib.parse.urlencode(
@@ -171,11 +217,13 @@ class JiraIssuesService:
             with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
                 payload = response.read()
                 status_code = getattr(response, "status", None)
+                elapsed_ms = int((time.perf_counter() - started_at) * 1000)
                 logger.info(
-                    "Получен ответ Jira: источник='%s', статус=%s, байт=%d",
+                    "Получен ответ Jira: источник='%s', статус=%s, байт=%d, время=%dms",
                     source.name,
                     status_code,
                     len(payload),
+                    elapsed_ms,
                 )
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="ignore")
