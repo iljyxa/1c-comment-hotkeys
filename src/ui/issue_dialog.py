@@ -3,7 +3,7 @@
 import threading
 from typing import Callable, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
     QApplication,
@@ -22,6 +22,8 @@ from PySide6.QtWidgets import (
 class IssueDialog(QDialog):
     """Диалог выбора задачи Jira из списка."""
 
+    refresh_completed = Signal(object, str, str)
+
     def __init__(
         self,
         issues: List[Dict[str, str]],
@@ -36,6 +38,7 @@ class IssueDialog(QDialog):
         self._cache_notice_text = cache_notice or ""
         self._refresh_handler = refresh_handler
         self._refresh_in_progress = False
+        self.refresh_completed.connect(self._on_refresh_finished)
         self._setup_ui()
         self._populate()
 
@@ -108,10 +111,15 @@ class IssueDialog(QDialog):
         self.refresh_button = QPushButton("Обновить")
         self.refresh_button.clicked.connect(self._on_refresh_clicked)
         self.refresh_button.setEnabled(self._refresh_handler is not None)
+        self.refresh_button.setAutoDefault(False)
+        self.refresh_button.setDefault(False)
         ok = QPushButton("OK")
         ok.clicked.connect(self._on_ok_clicked)
+        ok.setAutoDefault(True)
+        ok.setDefault(True)
         cancel = QPushButton("Отмена")
         cancel.clicked.connect(self.reject)
+        cancel.setAutoDefault(False)
         buttons.addWidget(self.refresh_button)
         buttons.addStretch()
         buttons.addWidget(ok)
@@ -171,23 +179,9 @@ class IssueDialog(QDialog):
         def worker() -> None:
             try:
                 refreshed_issues, cache_notice = self._refresh_handler()
-                QTimer.singleShot(
-                    0,
-                    lambda: self._on_refresh_finished(
-                        refreshed_issues=refreshed_issues,
-                        cache_notice=cache_notice,
-                        error_text="",
-                    ),
-                )
+                self.refresh_completed.emit(refreshed_issues, cache_notice, "")
             except Exception as exc:
-                QTimer.singleShot(
-                    0,
-                    lambda: self._on_refresh_finished(
-                        refreshed_issues=None,
-                        cache_notice="",
-                        error_text=str(exc),
-                    ),
-                )
+                self.refresh_completed.emit(None, "", str(exc))
 
         threading.Thread(target=worker, daemon=True).start()
 

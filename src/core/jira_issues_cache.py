@@ -7,6 +7,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, List
 
+from core.atomic_io import atomic_write_json
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,8 +37,7 @@ class JiraIssuesCache:
     def save(self) -> None:
         with self._lock:
             try:
-                with open(self.cache_file, "w", encoding="utf-8") as f:
-                    json.dump(self._data, f, indent=2, ensure_ascii=False)
+                atomic_write_json(self.cache_file, self._data, indent=2, ensure_ascii=False)
             except Exception as exc:
                 logger.error("Не удалось сохранить кэш задач Jira: %s", exc)
 

@@ -4,6 +4,8 @@ import json
 import logging
 from pathlib import Path
 
+from core.atomic_io import atomic_write_json
+
 logger = logging.getLogger(__name__)
 
 
@@ -56,7 +58,6 @@ class JiraLastIssueRepository:
     def save(self) -> None:
         """Сохранить состояние в файл."""
         try:
-            with open(self.storage_file, "w", encoding="utf-8") as f:
-                json.dump(self._by_source, f, indent=2, ensure_ascii=False)
+            atomic_write_json(self.storage_file, self._by_source, indent=2, ensure_ascii=False)
         except Exception as exc:
             logger.warning("Не удалось сохранить last issue state: %s", exc)

@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QPushButton, QTableWidget, QTableWidgetItem, QMessageBox,
     QDialog, QFormLayout, QLineEdit, QTextEdit, QComboBox,
     QLabel, QSystemTrayIcon, QMenu, QApplication, QStyle,
-    QGroupBox, QCheckBox, QHeaderView, QSpinBox
+    QGroupBox, QCheckBox, QHeaderView, QSpinBox, QAbstractItemView
 )
 from PySide6.QtCore import Qt, Signal, QEvent, QUrl
 from PySide6.QtGui import QAction, QIcon, QKeyEvent, QDesktopServices
@@ -260,6 +260,30 @@ class CommentEditDialog(QDialog):
         )
 
 
+class CommentsTableWidget(QTableWidget):
+    """Таблица комментариев с поддержкой перетаскивания строк."""
+
+    rows_reordered = Signal(object)
+
+    def _collect_row_order(self) -> list[int]:
+        order: list[int] = []
+        for row in range(self.rowCount()):
+            item = self.item(row, 0)
+            if item is None:
+                continue
+            value = item.data(Qt.UserRole)
+            if isinstance(value, int):
+                order.append(value)
+        return order
+
+    def dropEvent(self, event) -> None:
+        before = self._collect_row_order()
+        super().dropEvent(event)
+        after = self._collect_row_order()
+        if after and after != before:
+            self.rows_reordered.emit(after)
+
+
 class JiraSourcesDialog(QDialog):
     """Диалог редактирования источников Jira в таблице."""
 
@@ -501,13 +525,21 @@ class MainWindow(QMainWindow):
         layout.addWidget(settings_box)
         
         # Таблица комментариев
-        self.table = QTableWidget()
+        self.table = CommentsTableWidget()
         self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels(
             ["Название", "Шаблон", "Быстрая клавиша", "Источник"]
         )
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setDragEnabled(True)
+        self.table.setAcceptDrops(True)
+        self.table.viewport().setAcceptDrops(True)
+        self.table.setDropIndicatorShown(True)
+        self.table.setDragDropOverwriteMode(False)
+        self.table.setDragDropMode(QAbstractItemView.InternalMove)
+        self.table.setDefaultDropAction(Qt.MoveAction)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.Stretch)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
@@ -515,6 +547,7 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(3, QHeaderView.Stretch)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.table.cellDoubleClicked.connect(self._on_table_double_clicked)
+        self.table.rows_reordered.connect(self._on_comments_reordered)
         layout.addWidget(self.table)
         
         # Кнопки действий
@@ -618,12 +651,36 @@ class MainWindow(QMainWindow):
         self.table.setRowCount(len(comments))
         
         for i, comment in enumerate(comments):
-            self.table.setItem(i, 0, QTableWidgetItem(comment.name))
+            name_item = QTableWidgetItem(comment.name)
+            name_item.setData(Qt.UserRole, i)
+            self.table.setItem(i, 0, name_item)
             # Сокращаем длинный шаблон для компактного отображения
             template_preview = comment.template[:50] + "..." if len(comment.template) > 50 else comment.template
             self.table.setItem(i, 1, QTableWidgetItem(template_preview))
             self.table.setItem(i, 2, QTableWidgetItem(comment.hotkey))
             self.table.setItem(i, 3, QTableWidgetItem(comment.source))
+
+    def _on_comments_reordered(self, previous_order_indices: list[int]) -> None:
+        """Синхронизировать порядок таблицы комментариев с репозиторием."""
+        comments = self.repository.get_all()
+        if len(previous_order_indices) != len(comments):
+            logger.warning("Перестановка комментариев пропущена: некорректная длина порядка")
+            return
+
+        expected = set(range(len(comments)))
+        if set(previous_order_indices) != expected:
+            logger.warning("Перестановка комментариев пропущена: поврежден порядок строк")
+            return
+
+        reordered = [comments[index] for index in previous_order_indices]
+        self.repository.set_all(reordered)
+
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item is not None:
+                item.setData(Qt.UserRole, row)
+
+        logger.info("Порядок комментариев изменен перетаскиванием")
 
     def _get_source_names(self) -> list[str]:
         """Вернуть список имен доступных Jira-источников."""

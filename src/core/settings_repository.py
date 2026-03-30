@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from core.atomic_io import atomic_write_json
 from core.config_paths import get_config_dir
 
 logger = logging.getLogger(__name__)
@@ -93,8 +94,7 @@ class SettingsRepository:
             },
         })
         try:
-            with open(self.config_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+            atomic_write_json(self.config_file, data, indent=2, ensure_ascii=False)
             logger.info("Настройки сохранены")
         except Exception as exc:
             logger.error("Не удалось сохранить настройки: %s", exc)

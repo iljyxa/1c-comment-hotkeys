@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List, Optional
 import logging
 
+from core.atomic_io import atomic_write_json
 from core.config_paths import get_config_dir
 
 logger = logging.getLogger(__name__)
@@ -81,8 +82,7 @@ class CommentsRepository:
         """Сохранить комментарии в файл `comments.json`."""
         try:
             data = [comment.to_dict() for comment in self._comments]
-            with open(self.comments_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+            atomic_write_json(self.comments_file, data, indent=2, ensure_ascii=False)
             logger.info("Сохранено комментариев: %d", len(self._comments))
         except Exception as e:
             logger.error("Не удалось сохранить комментарии: %s", e)
@@ -90,6 +90,10 @@ class CommentsRepository:
     def get_all(self) -> List[Comment]:
         """Получить все комментарии."""
         return self._comments.copy()
+
+    def set_all(self, comments: List[Comment]) -> None:
+        """Заменить весь список комментариев новым порядком."""
+        self._comments = comments.copy()
     
     def get_by_index(self, index: int) -> Optional[Comment]:
         """Получить комментарий по индексу."""
