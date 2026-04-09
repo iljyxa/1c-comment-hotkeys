@@ -199,34 +199,38 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v5
         with:
-          path: release-assets
+          name: prerelease-windows
+          path: release-assets/prerelease-windows
 
       - name: Delete previous v0.0 pre-release
         uses: actions/github-script@v8
         with:
           script: |
             const tag = "v0.0";
-            try {
-              const release = await github.rest.repos.getReleaseByTag({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                tag,
-              });
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            // Удаляем все релизы с этим тегом (включая возможные дубли draft).
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner,
+              repo,
+              per_page: 100,
+            });
+            const byTag = releases.filter((release) => release.tag_name === tag);
+            for (const release of byTag) {
               await github.rest.repos.deleteRelease({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                release_id: release.data.id,
+                owner,
+                repo,
+                release_id: release.id,
               });
-              core.info(`Deleted release for ${tag}`);
-            } catch (error) {
-              if (error.status !== 404) throw error;
-              core.info(`No existing release for ${tag}`);
+              core.info(`Deleted release id=${release.id} for tag ${tag}`);
             }
+            if (byTag.length === 0) core.info(`No existing releases for ${tag}`);
 
             try {
               await github.rest.git.deleteRef({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
+                owner,
+                repo,
                 ref: `tags/${tag}`,
               });
               core.info(`Deleted tag ${tag}`);
@@ -234,6 +238,17 @@ jobs:
               if (error.status !== 404) throw error;
               core.info(`No existing tag ${tag}`);
             }
+
+      - name: Verify artifact exists
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "release-assets/prerelease-windows/1c-comment-hotkeys.exe")) {
+            Write-Error "Artifact file not found: release-assets/prerelease-windows/1c-comment-hotkeys.exe"
+          }
+
+      - name: Wait for GitHub release/tag deletion propagation
+        shell: pwsh
+        run: Start-Sleep -Seconds 5
 
       - name: Publish pre-release
         uses: softprops/action-gh-release@v2
