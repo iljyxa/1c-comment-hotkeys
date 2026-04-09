@@ -11,8 +11,18 @@ from PySide6.QtWidgets import (
     QLabel, QSystemTrayIcon, QMenu, QApplication, QStyle,
     QGroupBox, QCheckBox, QHeaderView, QSpinBox, QAbstractItemView
 )
-from PySide6.QtCore import Qt, Signal, QEvent, QUrl
-from PySide6.QtGui import QAction, QIcon, QKeyEvent, QDesktopServices
+from PySide6.QtCore import Qt, Signal, QEvent, QUrl, QPoint
+from PySide6.QtGui import (
+    QAction,
+    QIcon,
+    QKeyEvent,
+    QDesktopServices,
+    QDrag,
+    QPainter,
+    QPen,
+    QColor,
+    QPixmap,
+)
 
 from core.comments_repository import Comment, CommentsRepository
 from core.jira_sources_repository import JiraSource, JiraSourcesRepository
@@ -263,25 +273,85 @@ class CommentEditDialog(QDialog):
 class CommentsTableWidget(QTableWidget):
     """Таблица комментариев с поддержкой перетаскивания строк."""
 
-    rows_reordered = Signal(object)
+    row_move_requested = Signal(int, int)
 
-    def _collect_row_order(self) -> list[int]:
-        order: list[int] = []
-        for row in range(self.rowCount()):
-            item = self.item(row, 0)
-            if item is None:
-                continue
-            value = item.data(Qt.UserRole)
-            if isinstance(value, int):
-                order.append(value)
-        return order
+    def _get_selected_row(self) -> int:
+        selected_rows = sorted({index.row() for index in self.selectedIndexes()})
+        if len(selected_rows) != 1:
+            return -1
+        return selected_rows[0]
+
+    def _calculate_target_row(self, pos: QPoint) -> int:
+        target_row = self.rowAt(pos.y())
+        if target_row < 0:
+            return self.rowCount()
+
+        rect = self.visualRect(self.model().index(target_row, 0))
+        if pos.y() > rect.center().y():
+            return target_row + 1
+        return target_row
+
+    def startDrag(self, supported_actions) -> None:
+        """Запустить перетаскивание с компактным preview."""
+        source_row = self._get_selected_row()
+        if source_row < 0:
+            return
+
+        model_indexes = self.selectedIndexes()
+        mime_data = self.model().mimeData(model_indexes)
+        if mime_data is None:
+            return
+
+        name_item = self.item(source_row, 0)
+        title = (name_item.text() if name_item else "").strip() or "Комментарий"
+        title = title[:36] + "..." if len(title) > 36 else title
+
+        drag = QDrag(self)
+        drag.setMimeData(mime_data)
+
+        pixmap = QPixmap(220, 30)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setBrush(QColor(52, 120, 246, 230))
+        painter.setPen(QPen(QColor(38, 93, 191)))
+        painter.drawRoundedRect(0, 0, 219, 29, 8, 8)
+        painter.setPen(QColor("white"))
+        painter.drawText(pixmap.rect().adjusted(10, 0, -8, 0), Qt.AlignVCenter | Qt.AlignLeft, f"Переместить: {title}")
+        painter.end()
+
+        drag.setPixmap(pixmap)
+        drag.setHotSpot(QPoint(12, 15))
+        drag.exec(Qt.MoveAction)
+
+    def dragMoveEvent(self, event) -> None:
+        if event.source() is self:
+            event.setDropAction(Qt.MoveAction)
+            event.accept()
+            return
+        event.ignore()
 
     def dropEvent(self, event) -> None:
-        before = self._collect_row_order()
-        super().dropEvent(event)
-        after = self._collect_row_order()
-        if after and after != before:
-            self.rows_reordered.emit(after)
+        if event.source() is not self:
+            event.ignore()
+            return
+
+        source_row = self._get_selected_row()
+        if source_row < 0:
+            event.ignore()
+            return
+
+        target_row = self._calculate_target_row(event.position().toPoint())
+        if target_row > source_row:
+            target_row -= 1
+
+        if target_row == source_row or target_row < 0 or target_row >= self.rowCount():
+            event.ignore()
+            return
+
+        self.row_move_requested.emit(source_row, target_row)
+        event.setDropAction(Qt.MoveAction)
+        event.accept()
 
 
 class JiraSourcesDialog(QDialog):
@@ -540,6 +610,11 @@ class MainWindow(QMainWindow):
         self.table.setDragDropOverwriteMode(False)
         self.table.setDragDropMode(QAbstractItemView.InternalMove)
         self.table.setDefaultDropAction(Qt.MoveAction)
+        self.table.setAlternatingRowColors(True)
+        self.table.setStyleSheet(
+            "QTableWidget::item { padding: 4px; }"
+            "QTableWidget::item:selected { background-color: #D9E9FF; color: #111111; }"
+        )
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.Stretch)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
@@ -547,7 +622,7 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(3, QHeaderView.Stretch)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.table.cellDoubleClicked.connect(self._on_table_double_clicked)
-        self.table.rows_reordered.connect(self._on_comments_reordered)
+        self.table.row_move_requested.connect(self._on_comment_move_requested)
         layout.addWidget(self.table)
         
         # Кнопки действий
@@ -652,7 +727,6 @@ class MainWindow(QMainWindow):
         
         for i, comment in enumerate(comments):
             name_item = QTableWidgetItem(comment.name)
-            name_item.setData(Qt.UserRole, i)
             self.table.setItem(i, 0, name_item)
             # Сокращаем длинный шаблон для компактного отображения
             template_preview = comment.template[:50] + "..." if len(comment.template) > 50 else comment.template
@@ -660,27 +734,27 @@ class MainWindow(QMainWindow):
             self.table.setItem(i, 2, QTableWidgetItem(comment.hotkey))
             self.table.setItem(i, 3, QTableWidgetItem(comment.source))
 
-    def _on_comments_reordered(self, previous_order_indices: list[int]) -> None:
-        """Синхронизировать порядок таблицы комментариев с репозиторием."""
+    def _on_comment_move_requested(self, source_row: int, target_row: int) -> None:
+        """Переставить комментарий в памяти после drag&drop строки."""
         comments = self.repository.get_all()
-        if len(previous_order_indices) != len(comments):
-            logger.warning("Перестановка комментариев пропущена: некорректная длина порядка")
+        if not (0 <= source_row < len(comments)):
+            logger.warning("Перестановка комментариев пропущена: source_row вне диапазона")
+            return
+        if not (0 <= target_row < len(comments)):
+            logger.warning("Перестановка комментариев пропущена: target_row вне диапазона")
             return
 
-        expected = set(range(len(comments)))
-        if set(previous_order_indices) != expected:
-            logger.warning("Перестановка комментариев пропущена: поврежден порядок строк")
-            return
+        moved = comments.pop(source_row)
+        comments.insert(target_row, moved)
+        self.repository.set_all(comments)
+        self._load_comments()
+        self.table.selectRow(target_row)
 
-        reordered = [comments[index] for index in previous_order_indices]
-        self.repository.set_all(reordered)
-
-        for row in range(self.table.rowCount()):
-            item = self.table.item(row, 0)
-            if item is not None:
-                item.setData(Qt.UserRole, row)
-
-        logger.info("Порядок комментариев изменен перетаскиванием")
+        logger.info(
+            "Порядок комментариев изменен перетаскиванием: %d -> %d",
+            source_row,
+            target_row,
+        )
 
     def _get_source_names(self) -> list[str]:
         """Вернуть список имен доступных Jira-источников."""
