@@ -275,6 +275,10 @@ class CommentsTableWidget(QTableWidget):
 
     row_move_requested = Signal(int, int)
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._drag_source_row: int = -1
+
     def _get_selected_row(self) -> int:
         selected_rows = sorted({index.row() for index in self.selectedIndexes()})
         if len(selected_rows) != 1:
@@ -296,10 +300,12 @@ class CommentsTableWidget(QTableWidget):
         source_row = self._get_selected_row()
         if source_row < 0:
             return
+        self._drag_source_row = source_row
 
         model_indexes = self.selectedIndexes()
         mime_data = self.model().mimeData(model_indexes)
         if mime_data is None:
+            self._drag_source_row = -1
             return
 
         name_item = self.item(source_row, 0)
@@ -323,6 +329,14 @@ class CommentsTableWidget(QTableWidget):
         drag.setPixmap(pixmap)
         drag.setHotSpot(QPoint(12, 15))
         drag.exec(Qt.MoveAction)
+        self._drag_source_row = -1
+
+    def dragEnterEvent(self, event) -> None:
+        if event.source() is self:
+            event.setDropAction(Qt.MoveAction)
+            event.accept()
+            return
+        event.ignore()
 
     def dragMoveEvent(self, event) -> None:
         if event.source() is self:
@@ -336,8 +350,9 @@ class CommentsTableWidget(QTableWidget):
             event.ignore()
             return
 
-        source_row = self._get_selected_row()
+        source_row = self._drag_source_row if self._drag_source_row >= 0 else self._get_selected_row()
         if source_row < 0:
+            self._drag_source_row = -1
             event.ignore()
             return
 
@@ -346,10 +361,12 @@ class CommentsTableWidget(QTableWidget):
             target_row -= 1
 
         if target_row == source_row or target_row < 0 or target_row >= self.rowCount():
+            self._drag_source_row = -1
             event.ignore()
             return
 
         self.row_move_requested.emit(source_row, target_row)
+        self._drag_source_row = -1
         event.setDropAction(Qt.MoveAction)
         event.accept()
 
