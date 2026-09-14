@@ -11,13 +11,14 @@ from PySide6.QtWidgets import (
     QLabel, QSystemTrayIcon, QMenu, QApplication, QStyle,
     QGroupBox, QCheckBox, QHeaderView, QSpinBox, QAbstractItemView
 )
-from PySide6.QtCore import Qt, Signal, QEvent, QUrl, QPoint
+from PySide6.QtCore import Qt, Signal, QEvent, QUrl, QPoint, QLocale
 from PySide6.QtGui import (
     QAction,
     QIcon,
     QKeyEvent,
     QDesktopServices,
     QDrag,
+    QDoubleValidator,
     QPainter,
     QPen,
     QColor,
@@ -26,6 +27,7 @@ from PySide6.QtGui import (
 
 from core.comments_repository import Comment, CommentsRepository
 from core.jira_sources_repository import JiraSource, JiraSourcesRepository
+from core.llm_profiles_repository import LlmProfile, LlmProfilesRepository
 from core.settings_repository import SettingsRepository
 
 logger = logging.getLogger(__name__)
@@ -109,18 +111,22 @@ class CommentEditDialog(QDialog):
         source_names: list[str],
         comment: Optional[Comment] = None,
         parent=None,
+        llm_profile_names: Optional[list[str]] = None,
     ):
         """Инициализировать диалог.
         
         Args:
+            source_names: Названия источников Jira для выбора.
             comment: Редактируемый комментарий, либо `None` для нового.
             parent: Родительский виджет.
+            llm_profile_names: Названия профилей LLM для выбора.
         """
         super().__init__(parent)
         
         self.comment = comment
         self.is_new = comment is None
         self.source_names = source_names
+        self.llm_profile_names = list(llm_profile_names or [])
         self._capturing_hotkey = False
         
         self._setup_ui()
@@ -161,6 +167,15 @@ class CommentEditDialog(QDialog):
         self.source_combo.addItems(self.source_names)
         layout.addRow("Источник:", self.source_combo)
 
+        # Необязательный профиль LLM для директивы {@llm}
+        self.llm_profile_combo = QComboBox()
+        self.llm_profile_combo.addItem("")
+        self.llm_profile_combo.addItems(self.llm_profile_names)
+        self.llm_profile_combo.setToolTip(
+            "Профиль, в который отправляются запросы директивы {@llm}...{@end} этого шаблона"
+        )
+        layout.addRow("Профиль LLM:", self.llm_profile_combo)
+
         # Признак скрытого комментария в диалоге выбора по глобальной клавише
         self.hidden_checkbox = QCheckBox()
         layout.addRow("Скрытый:", self.hidden_checkbox)
@@ -171,7 +186,9 @@ class CommentEditDialog(QDialog):
             "Модификатор: {text|prefix=\"// \"} — добавить префикс к каждой непустой строке {text}\n"
             "Директива блока: {@line_limit max=110 mode=wrap suffix=\"// \"}...{@end}\n"
             "Ограничивает длину строк только внутри блока, переносит по пробелам, suffix добавляет префикс"
-            " к продолжению строки."
+            " к продолжению строки.\n"
+            "Директива блока: {@llm}...{@end} — отправить содержимое блока (с подставленными макросами)"
+            " как промпт в выбранный профиль LLM и вставить ответ вместо блока."
         )
         macros_label.setWordWrap(True)
         macros_label.setStyleSheet("color: gray; font-size: 10pt;")
@@ -253,6 +270,9 @@ class CommentEditDialog(QDialog):
         index = self.source_combo.findText(comment.source)
         if index >= 0:
             self.source_combo.setCurrentIndex(index)
+        llm_index = self.llm_profile_combo.findText(comment.llm_profile)
+        if llm_index >= 0:
+            self.llm_profile_combo.setCurrentIndex(llm_index)
         self.hidden_checkbox.setChecked(bool(comment.hidden))
     
     def get_comment(self) -> Comment:
@@ -267,6 +287,7 @@ class CommentEditDialog(QDialog):
             hotkey=self.hotkey_input.text().strip(),
             source=self.source_combo.currentText().strip(),
             hidden=self.hidden_checkbox.isChecked(),
+            llm_profile=self.llm_profile_combo.currentText().strip(),
         )
 
 
@@ -559,6 +580,214 @@ class JiraSourcesDialog(QDialog):
             )
         return sources
 
+
+class LlmProfilesDialog(QDialog):
+    """Диалог редактирования профилей LLM в таблице (по образцу источников Jira)."""
+
+    _TIMEOUT_MIN = 1
+    _TIMEOUT_MAX = 600
+    _COL_NAME = 0
+    _COL_URL = 1
+    _COL_KEY = 2
+    _COL_MODEL = 3
+    _COL_TIMEOUT = 4
+    _COL_TEMPERATURE = 5
+
+    def __init__(self, profiles: list[LlmProfile], parent=None, encrypt_tokens: bool = True):
+        super().__init__(parent)
+        self._encrypt_tokens = bool(encrypt_tokens)
+        self.setWindowTitle("Профили LLM")
+        self.setMinimumWidth(1000)
+        self.setMinimumHeight(420)
+
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+
+        hint = QLabel(
+            "OpenAI-совместимый Chat Completions API: к адресу добавляется /chat/completions. "
+            "Например, https://api.openai.com/v1 или http://localhost:11434/v1 (Ollama, ключ можно не указывать). "
+            "Содержимое директивы {@llm} шаблона (включая выделенный код) отправляется на этот адрес."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: gray; font-size: 10pt;")
+        layout.addWidget(hint)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(
+            ["Название", "Адрес API", "Ключ API", "Модель", "Таймаут (сек)", "Temperature"]
+        )
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setEditTriggers(QTableWidget.AllEditTriggers)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(self._COL_NAME, QHeaderView.Stretch)
+        header.setSectionResizeMode(self._COL_URL, QHeaderView.Stretch)
+        header.setSectionResizeMode(self._COL_KEY, QHeaderView.Stretch)
+        header.setSectionResizeMode(self._COL_MODEL, QHeaderView.Stretch)
+        header.setSectionResizeMode(self._COL_TIMEOUT, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(self._COL_TEMPERATURE, QHeaderView.ResizeToContents)
+        layout.addWidget(self.table)
+
+        button_layout = QHBoxLayout()
+        self.add_button = QPushButton("Добавить")
+        self.add_button.clicked.connect(self._on_add_clicked)
+        self.delete_button = QPushButton("Удалить")
+        self.delete_button.clicked.connect(self._on_delete_clicked)
+        self.show_keys_checkbox = QCheckBox("Показать ключи")
+        self.show_keys_checkbox.toggled.connect(self._on_show_keys_toggled)
+        self.save_button = QPushButton("Сохранить")
+        self.save_button.clicked.connect(self.accept)
+        self.cancel_button = QPushButton("Отмена")
+        self.cancel_button.clicked.connect(self.reject)
+
+        button_layout.addWidget(self.add_button)
+        button_layout.addWidget(self.delete_button)
+        button_layout.addWidget(self.show_keys_checkbox)
+        button_layout.addStretch()
+        button_layout.addWidget(self.save_button)
+        button_layout.addWidget(self.cancel_button)
+        layout.addLayout(button_layout)
+
+        self._load_profiles(profiles)
+
+    def _create_timeout_spinbox(self, value: int) -> QSpinBox:
+        spin = QSpinBox()
+        spin.setRange(self._TIMEOUT_MIN, self._TIMEOUT_MAX)
+        spin.setValue(value)
+        spin.setToolTip("Таймаут ожидания ответа модели в секундах")
+        return spin
+
+    @staticmethod
+    def _create_temperature_edit(value: Optional[float]) -> QLineEdit:
+        """Поле temperature: пустое значение — параметр не передается провайдеру."""
+        edit = QLineEdit()
+        validator = QDoubleValidator(0.0, 2.0, 2)
+        validator.setNotation(QDoubleValidator.StandardNotation)
+        # Точка как разделитель независимо от локали, чтобы значение
+        # однозначно читалось обратно через float().
+        validator.setLocale(QLocale.c())
+        edit.setValidator(validator)
+        edit.setPlaceholderText("по умолч.")
+        edit.setToolTip(
+            "Temperature от 0 до 2. Пусто — не передавать параметр "
+            "(часть моделей принимает только значение по умолчанию)."
+        )
+        if value is not None:
+            edit.setText(f"{value:g}")
+        return edit
+
+    def _create_key_edit(self, value: str) -> QLineEdit:
+        """Поле ключа: маскируется, чтобы ключ не был виден на экране/скриншоте."""
+        edit = QLineEdit()
+        edit.setText(value)
+        edit.setEchoMode(
+            QLineEdit.Normal if self.show_keys_checkbox.isChecked() else QLineEdit.Password
+        )
+        if self._encrypt_tokens:
+            edit.setToolTip("Ключ хранится на диске в зашифрованном виде (Windows DPAPI)")
+        else:
+            edit.setToolTip(
+                "Ключ хранится на диске открытым текстом "
+                "(шифрование отключено в настройках приложения)"
+            )
+        return edit
+
+    def _on_show_keys_toggled(self, checked: bool) -> None:
+        mode = QLineEdit.Normal if checked else QLineEdit.Password
+        for row in range(self.table.rowCount()):
+            widget = self.table.cellWidget(row, self._COL_KEY)
+            if isinstance(widget, QLineEdit):
+                widget.setEchoMode(mode)
+
+    def _load_profiles(self, profiles: list[LlmProfile]) -> None:
+        self.table.setRowCount(len(profiles))
+        for row, profile in enumerate(profiles):
+            self._fill_row(row, profile)
+
+    def _fill_row(self, row: int, profile: LlmProfile) -> None:
+        self.table.setItem(row, self._COL_NAME, QTableWidgetItem(profile.name))
+        self.table.setItem(row, self._COL_URL, QTableWidgetItem(profile.base_url))
+        self.table.setCellWidget(row, self._COL_KEY, self._create_key_edit(profile.api_key))
+        self.table.setItem(row, self._COL_MODEL, QTableWidgetItem(profile.model))
+        self.table.setCellWidget(
+            row, self._COL_TIMEOUT, self._create_timeout_spinbox(profile.timeout_seconds)
+        )
+        self.table.setCellWidget(
+            row, self._COL_TEMPERATURE, self._create_temperature_edit(profile.temperature)
+        )
+
+    def _on_add_clicked(self) -> None:
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        self._fill_row(row, LlmProfile(name="", base_url="", model=""))
+        self.table.setCurrentCell(row, self._COL_NAME)
+        self.table.editItem(self.table.item(row, self._COL_NAME))
+
+    def _on_delete_clicked(self) -> None:
+        row = self.table.currentRow()
+        if row >= 0:
+            self.table.removeRow(row)
+
+    def get_profiles(self) -> list[LlmProfile]:
+        """Считать и провалидировать данные таблицы профилей."""
+        profiles: list[LlmProfile] = []
+        names_seen: set[str] = set()
+        for row in range(self.table.rowCount()):
+            name_item = self.table.item(row, self._COL_NAME)
+            url_item = self.table.item(row, self._COL_URL)
+            key_widget = self.table.cellWidget(row, self._COL_KEY)
+            model_item = self.table.item(row, self._COL_MODEL)
+            timeout_widget = self.table.cellWidget(row, self._COL_TIMEOUT)
+            temperature_widget = self.table.cellWidget(row, self._COL_TEMPERATURE)
+
+            name = (name_item.text() if name_item else "").strip()
+            base_url = (url_item.text() if url_item else "").strip()
+            api_key = (key_widget.text() if isinstance(key_widget, QLineEdit) else "").strip()
+            model = (model_item.text() if model_item else "").strip()
+            timeout_seconds = (
+                int(timeout_widget.value())
+                if isinstance(timeout_widget, QSpinBox)
+                else 60
+            )
+            temperature_raw = (
+                temperature_widget.text()
+                if isinstance(temperature_widget, QLineEdit)
+                else ""
+            ).strip().replace(",", ".")
+
+            if not any([name, base_url, api_key, model]):
+                continue
+            if not name or not base_url or not model:
+                raise ValueError(f"Строка {row + 1}: заполните название, адрес API и модель")
+            if not base_url.lower().startswith(("http://", "https://")):
+                raise ValueError(f"Строка {row + 1}: адрес API должен начинаться с http:// или https://")
+            if name in names_seen:
+                raise ValueError(f"Дубликат названия профиля: {name}")
+            if timeout_seconds < self._TIMEOUT_MIN or timeout_seconds > self._TIMEOUT_MAX:
+                raise ValueError(
+                    f"Строка {row + 1}: Таймаут должен быть от {self._TIMEOUT_MIN} до {self._TIMEOUT_MAX}"
+                )
+            temperature: Optional[float] = None
+            if temperature_raw:
+                try:
+                    temperature = float(temperature_raw)
+                except ValueError as exc:
+                    raise ValueError(f"Строка {row + 1}: некорректное значение temperature") from exc
+                if not 0.0 <= temperature <= 2.0:
+                    raise ValueError(f"Строка {row + 1}: temperature должна быть от 0 до 2")
+            names_seen.add(name)
+            profiles.append(
+                LlmProfile(
+                    name=name,
+                    base_url=base_url,
+                    model=model,
+                    api_key=api_key,
+                    timeout_seconds=timeout_seconds,
+                    temperature=temperature,
+                )
+            )
+        return profiles
+
 class MainWindow(QMainWindow):
     """Главное окно приложения."""
     
@@ -570,6 +799,7 @@ class MainWindow(QMainWindow):
         repository: CommentsRepository,
         settings_repository: SettingsRepository,
         jira_sources_repository: JiraSourcesRepository,
+        llm_profiles_repository: LlmProfilesRepository,
         hotkey_change_handler: Callable[[str], tuple[bool, str]],
         log_to_file_change_handler: Callable[[bool], None],
         refresh_sources_handler: Callable[[], None],
@@ -585,6 +815,7 @@ class MainWindow(QMainWindow):
         self.repository = repository
         self.settings_repository = settings_repository
         self.jira_sources_repository = jira_sources_repository
+        self.llm_profiles_repository = llm_profiles_repository
         self.hotkey_change_handler = hotkey_change_handler
         self.log_to_file_change_handler = log_to_file_change_handler
         self.refresh_sources_handler = refresh_sources_handler
@@ -629,11 +860,11 @@ class MainWindow(QMainWindow):
         self.start_minimized_checkbox = QCheckBox("Запускать в системном трее")
         self.log_to_file_checkbox = QCheckBox("Лог")
         self.log_to_file_checkbox.toggled.connect(self._on_log_to_file_toggled)
-        self.encrypt_tokens_checkbox = QCheckBox("Шифровать токены Jira")
+        self.encrypt_tokens_checkbox = QCheckBox("Шифровать токены и ключи")
         self.encrypt_tokens_checkbox.setToolTip(
-            "Хранить токены источников Jira в jira_sources.json зашифрованными через "
-            "Windows DPAPI (привязка к текущей учетной записи). "
-            "При отключении токены будут записаны открытым текстом."
+            "Хранить токены источников Jira (jira_sources.json) и ключи API профилей LLM "
+            "(llm_profiles.json) зашифрованными через Windows DPAPI (привязка к текущей "
+            "учетной записи). При отключении они будут записаны открытым текстом."
         )
         checkboxes_row = QHBoxLayout()
         checkboxes_row.addWidget(self.start_minimized_checkbox)
@@ -647,9 +878,9 @@ class MainWindow(QMainWindow):
         
         # Таблица комментариев
         self.table = CommentsTableWidget()
-        self.table.setColumnCount(4)
+        self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels(
-            ["Название", "Шаблон", "Быстрая клавиша", "Источник"]
+            ["Название", "Шаблон", "Быстрая клавиша", "Источник", "Профиль LLM"]
         )
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -671,6 +902,7 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(1, QHeaderView.Stretch)
         header.setSectionResizeMode(2, QHeaderView.Stretch)
         header.setSectionResizeMode(3, QHeaderView.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.Stretch)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.table.cellDoubleClicked.connect(self._on_table_double_clicked)
         self.table.row_move_requested.connect(self._on_comment_move_requested)
@@ -696,6 +928,9 @@ class MainWindow(QMainWindow):
 
         self.sources_button = QPushButton("Источники")
         self.sources_button.clicked.connect(self._on_sources_clicked)
+
+        self.llm_profiles_button = QPushButton("Профили LLM")
+        self.llm_profiles_button.clicked.connect(self._on_llm_profiles_clicked)
         
         self.save_button = QPushButton("Сохранить")
         self.save_button.clicked.connect(self._on_save_clicked)
@@ -705,6 +940,7 @@ class MainWindow(QMainWindow):
         button_layout.addWidget(self.edit_button)
         button_layout.addWidget(self.delete_button)
         button_layout.addWidget(self.sources_button)
+        button_layout.addWidget(self.llm_profiles_button)
         button_layout.addWidget(self.open_config_button)
         button_layout.addStretch()
         button_layout.addWidget(self.save_button)
@@ -784,6 +1020,7 @@ class MainWindow(QMainWindow):
             self.table.setItem(i, 1, QTableWidgetItem(template_preview))
             self.table.setItem(i, 2, QTableWidgetItem(comment.hotkey))
             self.table.setItem(i, 3, QTableWidgetItem(comment.source))
+            self.table.setItem(i, 4, QTableWidgetItem(comment.llm_profile))
 
     def _on_comment_move_requested(self, source_row: int, target_row: int) -> None:
         """Переставить комментарий в памяти после drag&drop строки."""
@@ -810,10 +1047,18 @@ class MainWindow(QMainWindow):
     def _get_source_names(self) -> list[str]:
         """Вернуть список имен доступных Jira-источников."""
         return [source.name for source in self.jira_sources_repository.get_all()]
+
+    def _get_llm_profile_names(self) -> list[str]:
+        """Вернуть список имен доступных профилей LLM."""
+        return [profile.name for profile in self.llm_profiles_repository.get_all()]
     
     def _on_add_clicked(self) -> None:
         """Обработать нажатие кнопки «Добавить»."""
-        dialog = CommentEditDialog(source_names=self._get_source_names(), parent=self)
+        dialog = CommentEditDialog(
+            source_names=self._get_source_names(),
+            parent=self,
+            llm_profile_names=self._get_llm_profile_names(),
+        )
         
         if dialog.exec() == QDialog.Accepted:
             try:
@@ -842,11 +1087,13 @@ class MainWindow(QMainWindow):
             hotkey=original.hotkey,
             source=original.source,
             hidden=original.hidden,
+            llm_profile=original.llm_profile,
         )
         dialog = CommentEditDialog(
             source_names=self._get_source_names(),
             comment=prefilled,
             parent=self,
+            llm_profile_names=self._get_llm_profile_names(),
         )
 
         if dialog.exec() == QDialog.Accepted:
@@ -873,6 +1120,7 @@ class MainWindow(QMainWindow):
                 source_names=self._get_source_names(),
                 comment=comment,
                 parent=self,
+                llm_profile_names=self._get_llm_profile_names(),
             )
             
             if dialog.exec() == QDialog.Accepted:
@@ -914,6 +1162,38 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить источники: {exc}")
             logger.error("Не удалось сохранить источники Jira: %s", exc)
+
+    def _on_llm_profiles_clicked(self) -> None:
+        """Открыть диалог редактирования профилей LLM."""
+        dialog = LlmProfilesDialog(
+            self.llm_profiles_repository.get_all(),
+            parent=self,
+            encrypt_tokens=self.llm_profiles_repository.get_encrypt_tokens(),
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        try:
+            profiles = dialog.get_profiles()
+            self.llm_profiles_repository.set_all(profiles)
+            self.llm_profiles_repository.save()
+
+            # Как и для источников Jira: ссылки на удаленные профили сбрасываем.
+            valid_profiles = set(self._get_llm_profile_names())
+            changed = False
+            for idx, comment in enumerate(self.repository.get_all()):
+                if comment.llm_profile and comment.llm_profile not in valid_profiles:
+                    comment.llm_profile = ""
+                    self.repository.update(idx, comment)
+                    changed = True
+            if changed:
+                self._load_comments()
+            logger.info("Обновлены профили LLM: %d", len(profiles))
+        except ValueError as exc:
+            QMessageBox.warning(self, "Ошибка", str(exc))
+        except Exception as exc:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить профили LLM: {exc}")
+            logger.error("Не удалось сохранить профили LLM: %s", exc)
 
     def _on_table_double_clicked(self, row: int, _column: int) -> None:
         """Открыть редактирование по двойному клику строки."""
@@ -991,6 +1271,13 @@ class MainWindow(QMainWindow):
                 self.jira_sources_repository.save()
                 logger.info(
                     "Шифрование токенов Jira %s, файл источников пересохранен",
+                    "включено" if encrypt_tokens else "отключено",
+                )
+            if encrypt_tokens != self.llm_profiles_repository.get_encrypt_tokens():
+                self.llm_profiles_repository.set_encrypt_tokens(encrypt_tokens)
+                self.llm_profiles_repository.save()
+                logger.info(
+                    "Шифрование ключей LLM %s, файл профилей пересохранен",
                     "включено" if encrypt_tokens else "отключено",
                 )
             QMessageBox.information(self, "Успех", "Настройки и комментарии сохранены")

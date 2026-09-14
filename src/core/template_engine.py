@@ -10,6 +10,18 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Обработчик запроса к LLM: (промпт, контекст рендера) -> текст ответа.
+LlmResolver = Callable[[str, dict], str]
+
+
+class TemplateRenderError(RuntimeError):
+    """Рендер нужно прервать целиком: частичный результат вставлять нельзя.
+
+    В отличие от прочих ошибок макросов и директив (после которых в результат
+    попадает исходный текст блока), например для `{@llm}` такая подстановка
+    означала бы вставку промпта в код пользователя.
+    """
+
 
 class TemplateEngine:
     """Движок обработки макросов в шаблонах."""
@@ -40,7 +52,15 @@ class TemplateEngine:
 
     _Token = _LiteralToken | _MacroToken | _BlockToken
 
-    def __init__(self):
+    def __init__(self, llm_resolver: Optional[LlmResolver] = None):
+        """Инициализировать движок.
+
+        Args:
+            llm_resolver: Обработчик директивы `{@llm}`. Движок не знает об HTTP:
+                он передает готовый промпт и контекст рендера, а получает текст
+                ответа. Без обработчика директива приводит к `TemplateRenderError`.
+        """
+        self._llm_resolver = llm_resolver
         self._compiled_cache: dict[str, tuple[TemplateEngine._Token, ...]] = {}
         self._macro_handlers: dict[str, Callable[[str, dict], str]] = {
             "text": lambda text, _context: text,
@@ -54,21 +74,45 @@ class TemplateEngine:
         self._modifier_handlers: dict[str, Callable[[str, str, str], str]] = {
             "prefix": self._modifier_prefix,
         }
-        self._block_handlers: dict[str, Callable[[str, tuple[tuple[str, str], ...]], str]] = {
+        self._block_handlers: dict[str, Callable[[str, tuple[tuple[str, str], ...], dict], str]] = {
             "line_limit": self._block_line_limit,
+            "llm": self._block_llm,
         }
 
     def render(self, template: str, text: str, context: Optional[Dict] = None) -> str:
-        """Подставить значения макросов в шаблон."""
+        """Подставить значения макросов в шаблон.
+
+        Raises:
+            TemplateRenderError: Результат использовать нельзя (см. описание класса).
+        """
         if context is None:
             context = {}
 
+        return self._render_tokens(self._compile_cached(template), text, context)
+
+    def uses_llm(self, template: str) -> bool:
+        """Есть ли в шаблоне директива `{@llm}` (рендер будет долгим и сетевым)."""
+        return self.count_llm_blocks(template) > 0
+
+    def count_llm_blocks(self, template: str) -> int:
+        """Количество запросов к LLM, которое потребует рендер шаблона."""
+        return self._count_blocks(self._compile_cached(template), "llm")
+
+    def _compile_cached(self, template: str) -> tuple[_Token, ...]:
         compiled = self._compiled_cache.get(template)
         if compiled is None:
             compiled = self._compile_template(template)
             self._compiled_cache[template] = compiled
+        return compiled
 
-        return self._render_tokens(compiled, text, context)
+    def _count_blocks(self, tokens: tuple[_Token, ...], name: str) -> int:
+        total = 0
+        for token in tokens:
+            if isinstance(token, self._BlockToken):
+                if token.name == name:
+                    total += 1
+                total += self._count_blocks(token.children, name)
+        return total
 
     def _render_tokens(self, tokens: tuple[_Token, ...], text: str, context: dict) -> str:
         parts = []
@@ -89,7 +133,9 @@ class TemplateEngine:
                 parts.append(block_value)
                 continue
             try:
-                parts.append(handler(block_value, token.args))
+                parts.append(handler(block_value, token.args, context))
+            except TemplateRenderError:
+                raise
             except Exception:
                 logger.exception("Ошибка применения блочной директивы '%s'", token.name)
                 parts.append(token.raw_start)
@@ -417,7 +463,7 @@ class TemplateEngine:
                 return line[cut_pos:]
         return line[cut_pos:]
 
-    def _block_line_limit(self, value: str, args: tuple[tuple[str, str], ...]) -> str:
+    def _block_line_limit(self, value: str, args: tuple[tuple[str, str], ...], _context: dict) -> str:
         options = {k: v for k, v in args}
         raw_max = options.get("max", "").strip()
         if not raw_max:
@@ -466,6 +512,46 @@ class TemplateEngine:
 
         return "".join(wrapped_lines)
 
+    def _block_llm(self, value: str, args: tuple[tuple[str, str], ...], context: dict) -> str:
+        """Отправить содержимое блока как промпт и подставить ответ модели.
+
+        Содержимое блока к этому моменту уже отрендерено, то есть `{text}` и
+        прочие макросы внутри промпта подставлены. По умолчанию из ответа
+        убираются markdown-ограждения кода и пробелы по краям — так шаблон сам
+        управляет переводами строк вокруг результата; `raw=true` отключает это.
+        """
+        if self._llm_resolver is None:
+            raise TemplateRenderError("Запросы к LLM недоступны")
+
+        prompt = value.strip()
+        if not prompt:
+            raise TemplateRenderError("Директива {@llm} не содержит промпта")
+
+        try:
+            answer = str(self._llm_resolver(prompt, context))
+        except TemplateRenderError:
+            raise
+        except Exception as exc:
+            raise TemplateRenderError(str(exc) or exc.__class__.__name__) from exc
+
+        options = {k: v for k, v in args}
+        if self._parse_bool(options.get("raw", "")):
+            return answer
+        return self._strip_code_fences(answer).strip()
+
+    @staticmethod
+    def _parse_bool(value: str) -> bool:
+        return (value or "").strip().lower() in ("1", "true", "yes", "on")
+
+    @staticmethod
+    def _strip_code_fences(text: str) -> str:
+        """Убрать обрамляющие ```lang ... ``` (или ~~~), если ответ целиком в них."""
+        stripped = text.strip()
+        match = re.fullmatch(r"(`{3,}|~{3,})[^\n]*\n(.*?)\n?\1", stripped, flags=re.DOTALL)
+        if match is None:
+            return text
+        return match.group(2)
+
     @staticmethod
     def _sanitize_jira_text(value: str) -> str:
         """Нормализовать текст из Jira после копирования из rich text."""
@@ -507,4 +593,6 @@ class TemplateEngine:
             '{author}': 'Автор комментария из настроек приложения',
             '{issue_key}': 'Ключ задачи Jira',
             '{issue_summary}': 'Краткое описание задачи Jira',
+            '{@line_limit max=110 mode=wrap suffix="// "}...{@end}': 'Ограничение длины строк внутри блока',
+            '{@llm}...{@end}': 'Отправить содержимое блока как промпт в LLM и подставить ответ',
         }

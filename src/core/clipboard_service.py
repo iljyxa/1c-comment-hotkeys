@@ -122,26 +122,50 @@ class ClipboardService:
             if selected_text is None:
                 logger.warning("Выделенный текст отсутствует, обрабатывать нечего")
                 return False
-            
-            # Шаг 1. Применяем шаблон
-            logger.info("Применяется шаблон: %s", comment.name)
-            modified_text = self._apply_template(selected_text, comment, context)
-            first_line_indent = self._detect_first_line_indent(selected_text)
-            indent_prefix = self._detect_indent_prefix(selected_text)
-            if first_line_indent or indent_prefix:
-                modified_text = self._apply_indent_prefix(
-                    modified_text,
-                    first_line_indent,
-                    indent_prefix,
-                )
-            
-            # Шаг 2. Записываем результат в буфер обмена
+            modified_text = self.render_text(selected_text, comment, context)
+        except Exception as e:
+            logger.error("Не удалось обработать текст: %s", e, exc_info=True)
+            self.restore_original_clipboard()
+            return False
+        return self.paste_text(modified_text)
+
+    def render_text(
+        self,
+        selected_text: str,
+        comment: Comment,
+        context: Optional[dict] = None,
+    ) -> str:
+        """Применить шаблон и нормализовать отступы (без обращения к буферу обмена).
+
+        Метод чистый и может выполняться в фоновом потоке — это нужно для
+        шаблонов с `{@llm}`, рендер которых занимает секунды.
+        """
+        logger.info("Применяется шаблон: %s", comment.name)
+        modified_text = self._apply_template(selected_text, comment, context)
+        first_line_indent = self._detect_first_line_indent(selected_text)
+        indent_prefix = self._detect_indent_prefix(selected_text)
+        if first_line_indent or indent_prefix:
+            modified_text = self._apply_indent_prefix(
+                modified_text,
+                first_line_indent,
+                indent_prefix,
+            )
+        return modified_text
+
+    def paste_text(self, modified_text: str) -> bool:
+        """Вставить готовый текст в активное окно и восстановить буфер обмена."""
+        try:
+            # Резервная копия буфера обычно уже снята при захвате; если ее нет
+            # (после долгого ожидания буфер возвращали пользователю), снимаем сейчас.
+            self._ensure_clipboard_backup()
+
+            # Шаг 1. Записываем результат в буфер обмена
             logger.info("Запись результата в буфер обмена")
             pyperclip.copy(modified_text)
             if self._paste_delay > 0:
                 time.sleep(self._paste_delay)
             
-            # Шаг 3. Эмулируем сочетание вставки
+            # Шаг 2. Эмулируем сочетание вставки
             logger.info(
                 "Эмуляция сочетания вставки (%s), длина текста=%d",
                 self._paste_shortcut,
@@ -159,6 +183,11 @@ class ClipboardService:
             return False
         finally:
             self.restore_original_clipboard()
+
+    def copy_to_clipboard(self, text: str) -> None:
+        """Положить текст в буфер обмена без вставки и без восстановления."""
+        pyperclip.copy(text)
+        logger.info("Результат скопирован в буфер обмена, длина=%d", len(text))
 
     def _send_shortcut(self, shortcut: str) -> None:
         """Отправить сочетание клавиш через backend `pynput`."""

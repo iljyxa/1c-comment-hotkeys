@@ -9,7 +9,8 @@
 Windows-утилита в системном трее для быстрого шаблонного комментирования кода
 (в первую очередь 1С): выделил фрагмент → нажал глобальную горячую клавишу →
 выбрал шаблон → результат вставлен на место выделения. Шаблоны могут
-подставлять номер и название задачи Jira из настроенного источника.
+подставлять номер и название задачи Jira из настроенного источника, а блок
+`{@llm}...{@end}` отправляет промпт в OpenAI-совместимый LLM и подставляет ответ.
 
 Платформа — **только Windows**. Linux/macOS не поддерживаются и не
 заявлены: глобальные хоткеи и эмуляция ввода через `pynput`, DPAPI, работа с
@@ -27,18 +28,23 @@ Windows-утилита в системном трее для быстрого ш
 
 ```
 src/app.py                       точка входа, класс Application: связывает сервисы и UI,
-                                 глобальные хоткеи, захват текста, сценарий вставки,
+                                 глобальные хоткеи, захват текста, сценарий вставки
+                                 (быстрый и долгий — с фоновым рендером для {@llm}),
                                  планировщик автообновления Jira
 src/core/
   hotkeys.py                     HotkeyManager — глобальные хоткеи через pynput.Listener
   clipboard_service.py           захват выделения (Ctrl+C), применение шаблона, вставка (Ctrl+V),
                                  сохранение/восстановление исходного буфера
   template_engine.py             макросы {text} {date} {author} {issue_key}..., модификаторы,
-                                 блочные директивы {@line_limit}...{@end}
+                                 блочные директивы {@line_limit}...{@end}, {@llm}...{@end},
+                                 TemplateRenderError (прерывает рендер целиком)
   comments_repository.py         шаблоны комментариев → comments.json
   settings_repository.py         настройки приложения → config.json
   jira_sources_repository.py     источники Jira → jira_sources.json (токены зашифрованы)
-  secret_store.py                Windows DPAPI через ctypes, формат "dpapi:<base64>"
+  llm_profiles_repository.py     профили LLM → llm_profiles.json (ключи зашифрованы)
+  llm_client.py                  POST /chat/completions через urllib, LlmError/TimeoutError
+  secret_store.py                Windows DPAPI через ctypes, формат "dpapi:<base64>",
+                                 unprotect_all() — общая логика загрузки секретов
   jira_issues_service.py         запросы к Jira REST (/rest/api/2/search), stale-while-revalidate
   jira_issues_cache.py           кэш задач → jira_issues_cache.json
   jira_last_issue_repository.py  последняя выбранная задача → jira_last_issue.json
@@ -46,9 +52,11 @@ src/core/
   config_paths.py                каталог %APPDATA%\1CCommentHotkeys (+ миграция из MS Store-пути)
 src/ui/
   main_window.py                 главное окно, трей, диалог редактирования шаблона,
-                                 диалог источников Jira (JiraSourcesDialog)
+                                 диалог источников Jira (JiraSourcesDialog),
+                                 диалог профилей LLM (LlmProfilesDialog)
   comment_dialog.py              выбор шаблона по хоткею
   issue_dialog.py                выбор задачи Jira
+  llm_progress_dialog.py         окно ожидания ответа LLM с кнопкой «Отмена»
 src/resources_rc.py              сгенерированный Qt-ресурс (иконка); не править руками
 .github/workflows/               сборка PyInstaller (см. «Релизы»)
 ```
@@ -72,27 +80,40 @@ src/resources_rc.py              сгенерированный Qt-ресурс 
    `<имя>.broken-<метка>` и выставляют `load_warning`, который `Application`
    показывает при старте. Помните: `Application.cleanup()` сохраняет
    `comments.json` при выходе всегда.
-4. **Токены Jira.** При включённой настройке `security.encrypt_tokens`
-   (по умолчанию включена, флажок «Шифровать токены Jira») на диске —
-   `dpapi:<base64>` (привязка к учётной записи Windows + энтропия
-   приложения); при выключенной — открытый текст. В памяти и в UI — всегда
-   открытый текст, это осознанно (нужен для `Authorization: Bearer`).
-   `JiraSourcesRepository.load()` приводит файл к текущей настройке в обе
-   стороны; переключение флажка в главном окне пересохраняет файл сразу.
-   Недешифруемый токен обнуляется с предупреждением, файл при этом *не*
-   считается битым и не пересохраняется.
-   Токен не должен попадать в логи и URL (сейчас не попадает — сохранять это).
+4. **Токены Jira и ключи LLM.** При включённой настройке
+   `security.encrypt_tokens` (по умолчанию включена, флажок «Шифровать токены
+   и ключи») на диске — `dpapi:<base64>` (привязка к учётной записи Windows +
+   энтропия приложения, константа `_ENTROPY` общая и менять её нельзя); при
+   выключенной — открытый текст. В памяти и в UI — всегда открытый текст, это
+   осознанно (нужен для `Authorization: Bearer`).
+   `JiraSourcesRepository.load()` и `LlmProfilesRepository.load()` приводят
+   файл к текущей настройке в обе стороны (общая логика —
+   `secret_store.unprotect_all()`); переключение флажка в главном окне
+   пересохраняет оба файла сразу. Недешифруемый секрет обнуляется с
+   предупреждением, файл при этом *не* считается битым и не пересохраняется.
+   Токен и ключ не должны попадать в логи и URL (сейчас не попадают —
+   сохранять это). Промпт и ответ LLM тоже не логируются (это код
+   пользователя), только их длины.
 5. **Захват текста** построен на задержках и `GetClipboardSequenceNumber`;
    значения задержек в `ClipboardService` подобраны эмпирически — менять
    только с ручной проверкой в 1С.
 6. **Порядок комментариев** = порядок в `comments.json`; drag&drop в таблице
    меняет только память, на диск попадает при «Сохранить» или выходе.
+7. **Шаблоны с `{@llm}` рендерятся в фоне и никогда частично.** Рендер идёт в
+   `threading.Thread` (`_start_llm_flow` в `app.py`), вставка — только после
+   ответа модели, в главном потоке, после закрытия окна ожидания и
+   восстановления фокуса. Ошибка любого запроса → `TemplateRenderError` →
+   ничего не вставляется (движок *не* подставляет исходный текст блока, как
+   делает для других директив, — иначе в код попал бы промпт). Быстрый путь
+   для шаблонов без `{@llm}` (`process_captured_text`) не менялся — его
+   задержки см. в п. 5.
 
 ## Конфигурация во время работы
 
 Каталог `%APPDATA%\1CCommentHotkeys\`: `config.json`, `comments.json`,
-`jira_sources.json`, `jira_issues_cache.json`, `jira_last_issue.json`,
-`app.log` (если включён флаг «Лог»). Формат каждого файла описан в `README.md`.
+`jira_sources.json`, `llm_profiles.json`, `jira_issues_cache.json`,
+`jira_last_issue.json`, `app.log` (если включён флаг «Лог»). Формат каждого
+файла описан в `README.md`.
 
 ## Как проверять изменения
 
@@ -103,7 +124,8 @@ src/resources_rc.py              сгенерированный Qt-ресурс 
   импорт регистрирует Qt-ресурсы и нужен).
 - Логику `core/*` можно гонять скриптами на любой ОС: репозитории принимают
   `config_dir`, `secret_store._call_dpapi` / `is_available` легко
-  подменяются заглушками.
+  подменяются заглушками. `LlmClient` удобно проверять против
+  `http.server` в потоке, `TemplateEngine` — с фейковым `llm_resolver`.
 - UI и `Application` целиком можно поднять headless:
   `QT_QPA_PLATFORM=offscreen PYNPUT_BACKEND=dummy APPDATA=<tmp> python ...`
   (на Linux нужны `libgl1 libegl1 libxcb-cursor0 libxkbcommon-x11-0`).

@@ -109,38 +109,26 @@ class JiraSourcesRepository:
             self._sources = []
             return
 
-        has_plaintext_token = False
-        has_protected_token = False
-        undecryptable: List[str] = []
-        for source in sources:
-            if not secret_store.is_protected(source.token):
-                if source.token:
-                    has_plaintext_token = True
-                continue
-            has_protected_token = True
-            try:
-                source.token = secret_store.unprotect(source.token)
-            except Exception as exc:
-                # Например, файл скопирован от другого пользователя Windows.
-                logger.error("Не удалось расшифровать токен источника '%s': %s", source.name, exc)
-                source.token = ""
-                undecryptable.append(source.name)
+        secrets = secret_store.unprotect_all(
+            [source.token for source in sources],
+            encrypt_enabled=self._encrypt_tokens,
+            labels=[source.name for source in sources],
+        )
+        for source, token in zip(sources, secrets.values):
+            source.token = token
         self._sources = sources
         logger.info("Загружено источников Jira: %d", len(self._sources))
 
-        if undecryptable:
+        if secrets.undecryptable:
+            # Например, файл скопирован от другого пользователя Windows.
             self.load_warning = (
                 "Не удалось расшифровать токены источников Jira: "
-                + ", ".join(undecryptable)
+                + ", ".join(sources[index].name for index in secrets.undecryptable)
                 + ".\nТокены зашифрованы для другой учетной записи Windows. "
                 "Введите их заново в окне «Источники»."
             )
 
-        needs_rewrite = (
-            (self._encrypt_tokens and has_plaintext_token and secret_store.is_available())
-            or (not self._encrypt_tokens and has_protected_token and not undecryptable)
-        )
-        if needs_rewrite:
+        if secrets.needs_rewrite:
             logger.info(
                 "Состояние токенов Jira в файле не совпадает с настройкой шифрования (%s), файл пересохраняется",
                 "включено" if self._encrypt_tokens else "выключено",

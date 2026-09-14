@@ -14,7 +14,7 @@ from PySide6.QtGui import QIcon, QPainter, QPixmap
 import resources_rc
 
 from core.comments_repository import CommentsRepository
-from core.template_engine import TemplateEngine
+from core.template_engine import TemplateEngine, TemplateRenderError
 from core.clipboard_service import ClipboardService
 from core.hotkeys import HotkeyManager
 from core.settings_repository import SettingsRepository
@@ -22,9 +22,12 @@ from core.jira_sources_repository import JiraSourcesRepository
 from core.jira_issues_cache import JiraIssuesCache
 from core.jira_issues_service import JiraIssuesService, JiraIssuesError
 from core.jira_last_issue_repository import JiraLastIssueRepository
+from core.llm_profiles_repository import LlmProfilesRepository
+from core.llm_client import LlmClient
 from ui.main_window import MainWindow
 from ui.comment_dialog import CommentDialog
 from ui.issue_dialog import IssueDialog
+from ui.llm_progress_dialog import LlmProgressDialog
 
 # Настройка логирования
 logging.basicConfig(
@@ -44,6 +47,20 @@ class AppSignals(QObject):
     # threading.Thread не срабатывает (у потока нет event loop), поэтому все
     # фоновые воркеры возвращают результат в UI только через этот сигнал.
     invoke_in_main_thread = Signal(object)
+
+
+class _LlmFlowState:
+    """Состояние одного сценария вставки с `{@llm}`.
+
+    Передается в контекст рендера, чтобы фоновый поток отмененного сценария
+    не мог повлиять на следующий (обновить его диалог или счетчик запросов).
+    """
+
+    def __init__(self, dialog: LlmProgressDialog, requests_total: int):
+        self.cancel_event = threading.Event()
+        self.dialog = dialog
+        self.requests_total = requests_total
+        self.requests_done = 0
 
 
 class Application:
@@ -71,7 +88,7 @@ class Application:
         self.repository = CommentsRepository()
         self.repository.load()
         
-        self.template_engine = TemplateEngine()
+        self.template_engine = TemplateEngine(llm_resolver=self._resolve_llm)
         self.clipboard_service = ClipboardService(self.template_engine)
         self.hotkey_manager = HotkeyManager()
         self.settings_repository = SettingsRepository(
@@ -85,6 +102,12 @@ class Application:
             encrypt_tokens=self.settings_repository.get_encrypt_tokens(),
         )
         self.jira_sources_repository.load()
+        self.llm_profiles_repository = LlmProfilesRepository(
+            config_dir=self.repository.config_dir,
+            encrypt_tokens=self.settings_repository.get_encrypt_tokens(),
+        )
+        self.llm_profiles_repository.load()
+        self.llm_client = LlmClient()
         
         # Инициализация интеграции Jira
         config_dir = self.repository.config_dir
@@ -99,6 +122,7 @@ class Application:
             repository=self.repository,
             settings_repository=self.settings_repository,
             jira_sources_repository=self.jira_sources_repository,
+            llm_profiles_repository=self.llm_profiles_repository,
             hotkey_change_handler=self._apply_hotkey,
             log_to_file_change_handler=self._apply_file_logging,
             refresh_sources_handler=self._refresh_all_sources,
@@ -110,6 +134,9 @@ class Application:
         self._hotkey_capture_in_progress = False
         self._hotkey_cooldown_until = 0.0
         self._target_window_handle = None
+        # Пока идет запрос к LLM (рендер в фоновом потоке), новые срабатывания
+        # горячих клавиш игнорируются.
+        self._llm_request_in_progress = False
         self._user_activity_lock = threading.Lock()
         self._last_user_activity_monotonic = time.monotonic()
         self._auto_refresh_idle_timeout_seconds = 60 * 60
@@ -140,6 +167,7 @@ class Application:
             for warning in (
                 self.repository.load_warning,
                 self.jira_sources_repository.load_warning,
+                self.llm_profiles_repository.load_warning,
             )
             if warning
         ]
@@ -467,6 +495,9 @@ class Application:
         if self._captured_text is not None:
             logger.debug("Горячая клавиша проигнорирована: захваченный текст ожидает выбора шаблона")
             return
+        if self._llm_request_in_progress:
+            logger.debug("Горячая клавиша проигнорирована: выполняется запрос к LLM")
+            return
         if self.comment_dialog is not None and self.comment_dialog.isVisible():
             logger.debug("Горячая клавиша проигнорирована: диалог комментариев уже открыт")
             return
@@ -580,6 +611,13 @@ class Application:
                 return
             context["author"] = self.settings_repository.get_author()
 
+            if self.template_engine.uses_llm(comment.template):
+                # Долгий путь: рендер в фоне, вставка после ответа модели.
+                # Буфер обмена вернется пользователю в finally на время ожидания.
+                context["llm_profile"] = comment.llm_profile
+                self._start_llm_flow(comment, selected_text, context, self._target_window_handle)
+                return
+
             # Восстановить окно назначения непосредственно перед вставкой.
             self._restore_foreground_window_handle(self._target_window_handle)
             
@@ -614,11 +652,164 @@ class Application:
             logger.debug("Не удалось получить дескриптор активного окна: %s", exc)
             return None
 
-    @staticmethod
-    def _restore_foreground_window_handle(hwnd) -> None:
-        """Попытаться вернуть фокус в окно назначения (только Windows)."""
-        if platform.system() != "Windows" or not hwnd:
+    def _resolve_llm(self, prompt: str, context: dict) -> str:
+        """Обработчик директивы `{@llm}` для движка шаблонов.
+
+        Вызывается из фонового потока рендера. Профиль берется из контекста
+        (`Comment.llm_profile`), ошибки превращаются в `TemplateRenderError`,
+        чтобы движок прервал рендер, а не подставил промпт в результат.
+        """
+        flow = context.get("_llm_flow")
+        if isinstance(flow, _LlmFlowState) and flow.cancel_event.is_set():
+            raise TemplateRenderError("Запрос к LLM отменен")
+
+        profile_name = str(context.get("llm_profile") or "").strip()
+        if not profile_name:
+            raise TemplateRenderError(
+                "В шаблоне есть директива {@llm}, но профиль LLM для комментария не выбран."
+            )
+        profile = self.llm_profiles_repository.get_by_name(profile_name)
+        if profile is None:
+            raise TemplateRenderError(f"Профиль LLM «{profile_name}» не найден.")
+
+        if isinstance(flow, _LlmFlowState):
+            flow.requests_done += 1
+            self._report_llm_progress(flow, profile_name)
+        try:
+            return self.llm_client.complete(profile, prompt)
+        except Exception as exc:
+            # TimeoutError и LlmError несут готовое сообщение для пользователя.
+            raise TemplateRenderError(str(exc)) from exc
+
+    def _report_llm_progress(self, flow: "_LlmFlowState", profile_name: str) -> None:
+        """Обновить строку состояния диалога ожидания (из любого потока)."""
+        if flow.requests_total > 1:
+            status = (
+                f"Запрос {flow.requests_done} из {flow.requests_total} "
+                f"к профилю «{profile_name}»…"
+            )
+        else:
+            status = f"Запрос к профилю «{profile_name}»…"
+
+        def update() -> None:
+            if not flow.cancel_event.is_set():
+                flow.dialog.set_status(status)
+
+        self.signals.invoke_in_main_thread.emit(update)
+
+    def _start_llm_flow(self, comment, selected_text: str, context: dict, target_hwnd) -> None:
+        """Отрендерить шаблон с `{@llm}` в фоне и вставить результат по готовности."""
+        profile_name = (getattr(comment, "llm_profile", "") or "").strip()
+        if not profile_name:
+            QMessageBox.warning(
+                self.main_window,
+                "LLM",
+                f"В шаблоне «{comment.name}» есть директива {{@llm}}, "
+                "но профиль LLM не выбран. Укажите его в настройках комментария.",
+            )
             return
+        if self.llm_profiles_repository.get_by_name(profile_name) is None:
+            QMessageBox.warning(
+                self.main_window,
+                "LLM",
+                f"Профиль LLM «{profile_name}» не найден. "
+                "Создайте его в окне «Профили LLM» или выберите другой в настройках комментария.",
+            )
+            return
+
+        dialog = LlmProgressDialog(parent=self.main_window)
+        dialog.set_status(f"Запрос к профилю «{profile_name}»…")
+        flow = _LlmFlowState(
+            dialog=dialog,
+            requests_total=self.template_engine.count_llm_blocks(comment.template),
+        )
+        dialog.cancelled.connect(lambda: self._on_llm_cancelled(flow))
+        context["_llm_flow"] = flow
+        self._llm_request_in_progress = True
+
+        def worker() -> None:
+            try:
+                rendered = self.clipboard_service.render_text(selected_text, comment, context)
+                outcome = ("ok", rendered)
+            except TemplateRenderError as exc:
+                outcome = ("error", str(exc))
+            except Exception as exc:
+                logger.error("Ошибка рендера шаблона с LLM: %s", exc, exc_info=True)
+                outcome = ("error", str(exc))
+            self.signals.invoke_in_main_thread.emit(
+                lambda: self._on_llm_render_finished(outcome, flow, target_hwnd)
+            )
+
+        logger.info(
+            "Запуск фонового рендера с LLM: шаблон='%s', профиль='%s', запросов=%d",
+            comment.name,
+            profile_name,
+            flow.requests_total,
+        )
+        threading.Thread(target=worker, daemon=True).start()
+        dialog.show()
+
+    def _on_llm_cancelled(self, flow: "_LlmFlowState") -> None:
+        """Пользователь закрыл диалог ожидания: результат запроса игнорируется.
+
+        Прервать `urllib` нельзя, поэтому поток доработает до ответа или
+        таймаута, а его результат будет отброшен по `cancel_event`.
+        """
+        flow.cancel_event.set()
+        self._llm_request_in_progress = False
+        logger.info("Запрос к LLM отменен пользователем")
+
+    def _on_llm_render_finished(self, outcome, flow: "_LlmFlowState", target_hwnd) -> None:
+        """Завершение фонового рендера (главный поток)."""
+        if flow.cancel_event.is_set():
+            logger.info("Результат рендера с LLM проигнорирован: запрос был отменен")
+            return
+
+        self._llm_request_in_progress = False
+        flow.dialog.finish()
+
+        status, payload = outcome
+        if status != "ok":
+            logger.warning("Рендер шаблона с LLM завершился ошибкой: %s", payload)
+            QMessageBox.warning(self.main_window, "LLM", str(payload))
+            return
+
+        # Важно: вставляем после полного закрытия диалога ожидания.
+        QTimer.singleShot(0, lambda: self._paste_rendered_text(payload, target_hwnd))
+
+    def _paste_rendered_text(self, text: str, target_hwnd) -> None:
+        """Вернуть фокус окну назначения и вставить готовый текст."""
+        try:
+            focused = self._restore_foreground_window_handle(target_hwnd)
+            if not focused:
+                # За время ожидания пользователь мог уйти в другое окно; слепой
+                # Ctrl+V туда опаснее, чем просто оставить результат в буфере.
+                self.clipboard_service.copy_to_clipboard(text)
+                QMessageBox.information(
+                    self.main_window,
+                    "LLM",
+                    "Окно назначения больше не активно. Результат скопирован "
+                    "в буфер обмена — вставьте его вручную (Ctrl+V).",
+                )
+                return
+            if self.clipboard_service.paste_text(text):
+                logger.info("Обработка текста с LLM завершена успешно")
+            else:
+                logger.warning("Не удалось вставить результат рендера с LLM")
+        except Exception as exc:
+            logger.error("Ошибка вставки результата LLM: %s", exc, exc_info=True)
+            self.clipboard_service.restore_original_clipboard()
+
+    @staticmethod
+    def _restore_foreground_window_handle(hwnd) -> bool:
+        """Попытаться вернуть фокус в окно назначения (только Windows).
+
+        Returns:
+            `True`, если после попытки активно именно окно назначения (вне
+            Windows или без дескриптора — всегда `True`, проверка невозможна).
+        """
+        if platform.system() != "Windows" or not hwnd:
+            return True
         try:
             user32 = ctypes.windll.user32
             # Восстанавливаем окно только если оно свернуто.
@@ -636,8 +827,10 @@ class Application:
                 set_result,
                 current,
             )
+            return current == hwnd
         except Exception as exc:
             logger.debug("Не удалось восстановить фокус окна %s: %s", hwnd, exc)
+            return True
 
     def _resolve_comment_context(self, comment) -> dict | None:
         """Подготовить контекст Jira для комментария с источником."""

@@ -20,6 +20,8 @@ class Comment:
     hotkey: str = ""
     source: str = ""
     hidden: bool = False
+    # Название профиля LLM для директивы {@llm} в шаблоне (аналог `source` для Jira).
+    llm_profile: str = ""
     
     def to_dict(self) -> dict:
         """Преобразовать в словарь."""
@@ -41,6 +43,7 @@ class Comment:
             hotkey=data.get("hotkey", ""),
             source=data.get("source", ""),
             hidden=hidden,
+            llm_profile=str(data.get("llm_profile", "") or "").strip(),
         )
 
 

@@ -143,11 +143,11 @@ class SettingsRepository:
         self.settings.author = str(value or "").strip()
 
     def get_encrypt_tokens(self) -> bool:
-        """Вернуть флаг шифрования токенов Jira на диске (DPAPI)."""
+        """Вернуть флаг шифрования токенов Jira и ключей LLM на диске (DPAPI)."""
         return self.settings.encrypt_tokens
 
     def set_encrypt_tokens(self, value: bool) -> None:
-        """Обновить флаг шифрования токенов Jira на диске (DPAPI)."""
+        """Обновить флаг шифрования токенов Jira и ключей LLM на диске (DPAPI)."""
         self.settings.encrypt_tokens = bool(value)
 
     @staticmethod

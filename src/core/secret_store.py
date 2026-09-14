@@ -1,4 +1,4 @@
-"""Защита секретов (токенов) на диске через Windows DPAPI.
+"""Защита секретов (токенов Jira, ключей LLM) на диске через Windows DPAPI.
 
 Зашифрованное значение хранится в виде строки ``dpapi:<base64>``. Значение без
 префикса считается открытым текстом (legacy-конфигурация) и перешифровывается
@@ -13,6 +13,8 @@ import ctypes
 import logging
 import os
 from ctypes import wintypes
+from dataclasses import dataclass, field
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +22,8 @@ PROTECTED_PREFIX = "dpapi:"
 
 # Дополнительная энтропия привязывает blob к приложению: другой процесс того же
 # пользователя должен знать это значение, чтобы расшифровать данные через DPAPI.
+# Значение общее для всех секретов приложения; менять его нельзя — уже
+# сохраненные токены перестанут расшифровываться.
 _ENTROPY = b"1CCommentHotkeys.jira_sources.v1"
 
 _CRYPTPROTECT_UI_FORBIDDEN = 0x01
@@ -100,3 +104,58 @@ def unprotect(value: str) -> str:
     encrypted = base64.b64decode(value[len(PROTECTED_PREFIX):])
     decrypted = _call_dpapi("CryptUnprotectData", encrypted)
     return decrypted.decode("utf-8")
+
+
+@dataclass
+class SecretsLoadResult:
+    """Результат приведения прочитанных с диска секретов к открытому тексту."""
+
+    # Значения открытым текстом; нерасшифрованные заменены пустой строкой.
+    values: list[str] = field(default_factory=list)
+    # Индексы значений, которые не удалось расшифровать.
+    undecryptable: list[int] = field(default_factory=list)
+    # Состояние файла не совпадает с настройкой шифрования, файл нужно пересохранить.
+    needs_rewrite: bool = False
+
+
+def unprotect_all(
+    values: list[str],
+    encrypt_enabled: bool,
+    labels: Optional[list[str]] = None,
+) -> SecretsLoadResult:
+    """Расшифровать список секретов и решить, нужно ли пересохранять файл.
+
+    Общая логика для всех репозиториев с секретами: открытые значения при
+    включенном шифровании и зашифрованные при выключенном означают, что файл
+    записан старой версией или настройку только что переключили. Нерасшифрованные
+    значения (например, файл скопирован от другого пользователя Windows)
+    обнуляются, и в этом случае файл пересохранять нельзя.
+
+    Args:
+        values: Значения секретов в том виде, как они прочитаны из файла.
+        encrypt_enabled: Текущее значение настройки шифрования.
+        labels: Подписи для логов (по одной на значение), например имена источников.
+    """
+    result = SecretsLoadResult()
+    has_plaintext = False
+    has_protected = False
+    for index, value in enumerate(values):
+        if not is_protected(value):
+            if value:
+                has_plaintext = True
+            result.values.append(value)
+            continue
+        has_protected = True
+        try:
+            result.values.append(unprotect(value))
+        except Exception as exc:
+            label = labels[index] if labels and index < len(labels) else str(index)
+            logger.error("Не удалось расшифровать секрет '%s': %s", label, exc)
+            result.values.append("")
+            result.undecryptable.append(index)
+
+    result.needs_rewrite = (
+        (encrypt_enabled and has_plaintext and is_available())
+        or (not encrypt_enabled and has_protected and not result.undecryptable)
+    )
+    return result
