@@ -197,7 +197,8 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v5
         with:
-          path: release-assets
+          name: release-windows
+          path: release-assets/release-windows
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
