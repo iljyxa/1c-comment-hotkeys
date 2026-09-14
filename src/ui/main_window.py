@@ -522,6 +522,15 @@ class JiraSourcesDialog(QDialog):
         if row >= 0:
             self.table.removeRow(row)
 
+    def accept(self) -> None:
+        """Проверить таблицу до закрытия: при ошибке диалог остается открытым с правками."""
+        try:
+            self.get_sources()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Ошибка", str(exc))
+            return
+        super().accept()
+
     def get_sources(self) -> list[JiraSource]:
         """Считать и провалидировать данные таблицы источников."""
         sources: list[JiraSource] = []
