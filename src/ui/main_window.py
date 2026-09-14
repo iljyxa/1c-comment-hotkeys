@@ -728,6 +728,15 @@ class LlmProfilesDialog(QDialog):
         if row >= 0:
             self.table.removeRow(row)
 
+    def accept(self) -> None:
+        """Проверить таблицу до закрытия: при ошибке диалог остается открытым с правками."""
+        try:
+            self.get_profiles()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Ошибка", str(exc))
+            return
+        super().accept()
+
     def get_profiles(self) -> list[LlmProfile]:
         """Считать и провалидировать данные таблицы профилей."""
         profiles: list[LlmProfile] = []
