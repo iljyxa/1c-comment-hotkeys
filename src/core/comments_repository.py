@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import List, Optional
 import logging
 
-from core.atomic_io import atomic_write_json
+from core.atomic_io import atomic_write_json, backup_corrupted_file
 from core.config_paths import get_config_dir
 
 logger = logging.getLogger(__name__)
@@ -61,9 +61,11 @@ class CommentsRepository:
         
         self.comments_file = self.config_dir / "comments.json"
         self._comments: List[Comment] = []
+        self.load_warning: Optional[str] = None
     
     def load(self) -> None:
         """Загрузить комментарии из файла `comments.json`."""
+        self.load_warning = None
         if not self.comments_file.exists():
             logger.info("Файл комментариев не найден, используется набор по умолчанию")
             self._create_fallback_comment()
@@ -75,8 +77,16 @@ class CommentsRepository:
             self._comments = [Comment.from_dict(item) for item in data]
             logger.info("Загружено комментариев: %d", len(self._comments))
         except Exception as e:
-            logger.error("Не удалось загрузить комментарии: %s", e)
-            self._comments = []
+            # Поврежденный файл откладываем в сторону: иначе save() при выходе
+            # перезаписал бы его пустым списком и данные были бы потеряны.
+            backup = backup_corrupted_file(self.comments_file)
+            logger.error("Не удалось загрузить комментарии: %s (резервная копия: %s)", e, backup)
+            self.load_warning = (
+                f"Файл комментариев поврежден и не был загружен: {e}\n"
+                f"Резервная копия: {backup or 'создать не удалось'}\n"
+                "Загружен набор шаблонов по умолчанию."
+            )
+            self._create_fallback_comment()
     
     def save(self) -> None:
         """Сохранить комментарии в файл `comments.json`."""

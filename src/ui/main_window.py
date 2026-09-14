@@ -409,6 +409,8 @@ class JiraSourcesDialog(QDialog):
         self.add_button.clicked.connect(self._on_add_clicked)
         self.delete_button = QPushButton("Удалить")
         self.delete_button.clicked.connect(self._on_delete_clicked)
+        self.show_tokens_checkbox = QCheckBox("Показать токены")
+        self.show_tokens_checkbox.toggled.connect(self._on_show_tokens_toggled)
         self.save_button = QPushButton("Сохранить")
         self.save_button.clicked.connect(self.accept)
         self.cancel_button = QPushButton("Отмена")
@@ -416,6 +418,7 @@ class JiraSourcesDialog(QDialog):
 
         button_layout.addWidget(self.add_button)
         button_layout.addWidget(self.delete_button)
+        button_layout.addWidget(self.show_tokens_checkbox)
         button_layout.addStretch()
         button_layout.addWidget(self.save_button)
         button_layout.addWidget(self.cancel_button)
@@ -437,6 +440,23 @@ class JiraSourcesDialog(QDialog):
         spin.setToolTip("Таймаут запроса в секундах (минимум 1)")
         return spin
 
+    def _create_token_edit(self, value: str) -> QLineEdit:
+        """Поле токена: маскируется, чтобы токен не был виден на экране/скриншоте."""
+        edit = QLineEdit()
+        edit.setText(value)
+        edit.setEchoMode(
+            QLineEdit.Normal if self.show_tokens_checkbox.isChecked() else QLineEdit.Password
+        )
+        edit.setToolTip("Токен хранится на диске в зашифрованном виде (Windows DPAPI)")
+        return edit
+
+    def _on_show_tokens_toggled(self, checked: bool) -> None:
+        mode = QLineEdit.Normal if checked else QLineEdit.Password
+        for row in range(self.table.rowCount()):
+            widget = self.table.cellWidget(row, 2)
+            if isinstance(widget, QLineEdit):
+                widget.setEchoMode(mode)
+
     @staticmethod
     def _create_auto_refresh_checkbox(enabled: bool) -> QCheckBox:
         checkbox = QCheckBox()
@@ -452,7 +472,7 @@ class JiraSourcesDialog(QDialog):
         for row, source in enumerate(sources):
             self.table.setItem(row, 0, QTableWidgetItem(source.name))
             self.table.setItem(row, 1, QTableWidgetItem(source.url))
-            self.table.setItem(row, 2, QTableWidgetItem(source.token))
+            self.table.setCellWidget(row, 2, self._create_token_edit(source.token))
             self.table.setCellWidget(row, 3, self._create_ttl_spinbox(source.ttl_minutes))
             self.table.setCellWidget(row, 4, self._create_timeout_spinbox(source.timeout_seconds))
             self.table.setCellWidget(row, 5, self._create_auto_refresh_checkbox(source.auto_refresh))
@@ -462,7 +482,7 @@ class JiraSourcesDialog(QDialog):
         self.table.insertRow(row)
         self.table.setItem(row, 0, QTableWidgetItem(""))
         self.table.setItem(row, 1, QTableWidgetItem(""))
-        self.table.setItem(row, 2, QTableWidgetItem(""))
+        self.table.setCellWidget(row, 2, self._create_token_edit(""))
         self.table.setCellWidget(row, 3, self._create_ttl_spinbox(5))
         self.table.setCellWidget(row, 4, self._create_timeout_spinbox(2))
         self.table.setCellWidget(row, 5, self._create_auto_refresh_checkbox(False))
@@ -481,14 +501,14 @@ class JiraSourcesDialog(QDialog):
         for row in range(self.table.rowCount()):
             name_item = self.table.item(row, 0)
             url_item = self.table.item(row, 1)
-            token_item = self.table.item(row, 2)
+            token_widget = self.table.cellWidget(row, 2)
             ttl_widget = self.table.cellWidget(row, 3)
             timeout_widget = self.table.cellWidget(row, 4)
             auto_refresh_widget = self.table.cellWidget(row, 5)
 
             name = (name_item.text() if name_item else "").strip()
             url = (url_item.text() if url_item else "").strip()
-            token = (token_item.text() if token_item else "").strip()
+            token = (token_widget.text() if isinstance(token_widget, QLineEdit) else "").strip()
             ttl_minutes = (
                 int(ttl_widget.value())
                 if isinstance(ttl_widget, QSpinBox)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -57,3 +58,22 @@ def atomic_write_json(
                 temp_path.unlink()
             except Exception:
                 pass
+
+
+def backup_corrupted_file(target_file: Path) -> Path | None:
+    """Переименовать поврежденный файл в `<имя>.broken-<метка времени>`.
+
+    Используется при ошибке чтения конфигурации, чтобы последующее сохранение
+    не затерло данные, которые еще можно восстановить вручную.
+    Возвращает путь резервной копии или `None`, если переименовать не удалось.
+    """
+    source = Path(target_file)
+    if not source.exists():
+        return None
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup = source.with_name(f"{source.name}.broken-{stamp}")
+    try:
+        os.replace(str(source), str(backup))
+    except Exception:
+        return None
+    return backup

@@ -40,6 +40,10 @@ class AppSignals(QObject):
     show_comment_dialog = Signal()
     hotkey_triggered = Signal()
     quick_comment_hotkey_triggered = Signal(object)
+    # Выполнить callable в главном потоке Qt. QTimer.singleShot из обычного
+    # threading.Thread не срабатывает (у потока нет event loop), поэтому все
+    # фоновые воркеры возвращают результат в UI только через этот сигнал.
+    invoke_in_main_thread = Signal(object)
 
 
 class Application:
@@ -61,6 +65,7 @@ class Application:
         self.signals.quick_comment_hotkey_triggered.connect(
             self._on_quick_comment_hotkey_main_thread
         )
+        self.signals.invoke_in_main_thread.connect(self._invoke_in_main_thread)
         
         # Инициализация сервисов
         self.repository = CommentsRepository()
@@ -115,8 +120,32 @@ class Application:
         self._setup_hotkeys()
         self._warmup_jira_cache()
         self._start_auto_refresh_scheduler()
+        QTimer.singleShot(0, self._show_load_warnings)
         
         logger.info("Приложение инициализировано")
+
+    @staticmethod
+    def _invoke_in_main_thread(callback) -> None:
+        """Слот сигнала `invoke_in_main_thread`."""
+        try:
+            callback()
+        except Exception as exc:
+            logger.error("Ошибка callback в главном потоке: %s", exc, exc_info=True)
+
+    def _show_load_warnings(self) -> None:
+        """Показать предупреждения о проблемах при загрузке конфигурации."""
+        warnings = [
+            warning
+            for warning in (
+                self.repository.load_warning,
+                self.jira_sources_repository.load_warning,
+            )
+            if warning
+        ]
+        if not warnings:
+            return
+        self.main_window.show_window()
+        QMessageBox.warning(self.main_window, "Конфигурация", "\n\n".join(warnings))
 
     def _apply_file_logging(self, enabled: bool) -> None:
         """Включить/выключить запись логов в файл."""
@@ -177,7 +206,7 @@ class Application:
                         "Источники успешно обновлены.",
                     )
 
-            QTimer.singleShot(0, notify)
+            self.signals.invoke_in_main_thread.emit(notify)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -630,14 +659,15 @@ class Application:
             "Выполняется фоновое обновление источника."
         )
 
-        def on_refresh_success() -> None:
-            dialog_state["refreshed"] = True
+        def clear_dialog_notice() -> None:
             dialog = dialog_state.get("dialog")
-            if dialog is None:
-                return
-            if not dialog.isVisible():
-                return
-            QTimer.singleShot(0, dialog.clear_cache_notice)
+            if dialog is not None and dialog.isVisible():
+                dialog.clear_cache_notice()
+
+        def on_refresh_success() -> None:
+            # Вызывается из фонового потока: к виджетам обращаемся только в главном.
+            dialog_state["refreshed"] = True
+            self.signals.invoke_in_main_thread.emit(clear_dialog_notice)
 
         try:
             issues, used_cached_fallback = self.jira_issues_service.get_issues_for_source(

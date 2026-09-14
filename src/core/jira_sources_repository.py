@@ -6,7 +6,8 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import List, Optional
 
-from core.atomic_io import atomic_write_json
+from core import secret_store
+from core.atomic_io import atomic_write_json, backup_corrupted_file
 from core.config_paths import get_config_dir
 
 logger = logging.getLogger(__name__)
@@ -68,9 +69,15 @@ class JiraSourcesRepository:
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.sources_file = self.config_dir / "jira_sources.json"
         self._sources: List[JiraSource] = []
+        self.load_warning: Optional[str] = None
 
     def load(self) -> None:
-        """Загрузить источники из файла конфигурации."""
+        """Загрузить источники из файла конфигурации.
+
+        Токены в файле хранятся зашифрованными через DPAPI (`dpapi:<base64>`).
+        Токены открытым текстом (legacy) принимаются и перешифровываются сразу.
+        """
+        self.load_warning = None
         if not self.sources_file.exists():
             self._sources = []
             logger.info("Файл источников Jira не найден, используется пустой список")
@@ -79,16 +86,59 @@ class JiraSourcesRepository:
         try:
             with open(self.sources_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            self._sources = [JiraSource.from_dict(item) for item in data]
-            logger.info("Загружено источников Jira: %d", len(self._sources))
+            sources = [JiraSource.from_dict(item) for item in data]
         except Exception as exc:
-            logger.error("Не удалось загрузить источники Jira: %s", exc)
+            # Поврежденный файл откладываем в сторону, чтобы следующее сохранение
+            # из окна "Источники" не затерло его пустым списком.
+            backup = backup_corrupted_file(self.sources_file)
+            logger.error("Не удалось загрузить источники Jira: %s (резервная копия: %s)", exc, backup)
+            self.load_warning = (
+                f"Файл источников Jira поврежден и не был загружен: {exc}\n"
+                f"Резервная копия: {backup or 'создать не удалось'}"
+            )
             self._sources = []
+            return
+
+        has_plaintext_token = False
+        undecryptable: List[str] = []
+        for source in sources:
+            if not secret_store.is_protected(source.token):
+                if source.token:
+                    has_plaintext_token = True
+                continue
+            try:
+                source.token = secret_store.unprotect(source.token)
+            except Exception as exc:
+                # Например, файл скопирован от другого пользователя Windows.
+                logger.error("Не удалось расшифровать токен источника '%s': %s", source.name, exc)
+                source.token = ""
+                undecryptable.append(source.name)
+        self._sources = sources
+        logger.info("Загружено источников Jira: %d", len(self._sources))
+
+        if undecryptable:
+            self.load_warning = (
+                "Не удалось расшифровать токены источников Jira: "
+                + ", ".join(undecryptable)
+                + ".\nТокены зашифрованы для другой учетной записи Windows. "
+                "Введите их заново в окне «Источники»."
+            )
+
+        if has_plaintext_token and secret_store.is_available():
+            logger.info("Обнаружены токены Jira открытым текстом, выполняется шифрование")
+            try:
+                self.save()
+            except Exception:
+                logger.warning("Не удалось перешифровать токены Jira при загрузке")
 
     def save(self) -> None:
-        """Сохранить источники в файл конфигурации."""
+        """Сохранить источники в файл конфигурации (токены шифруются через DPAPI)."""
         try:
-            data = [source.to_dict() for source in self._sources]
+            data = []
+            for source in self._sources:
+                item = source.to_dict()
+                item["token"] = secret_store.protect(source.token)
+                data.append(item)
             atomic_write_json(self.sources_file, data, indent=2, ensure_ascii=False)
             logger.info("Сохранено источников Jira: %d", len(self._sources))
         except Exception as exc:
