@@ -116,30 +116,30 @@ python src/app.py
 
 ### Файл comments.json
 
-Содержит список шаблонов комментариев:
+Содержит список шаблонов комментариев. При первом запуске (или если файл поврежден) создается набор по умолчанию: `Код добавлен`, `Код удален`, `Метод добавлен`, `Коммит`, `Метаданные`, `Номер задачи`, `Код изменен`, `Расширение - Вставка`, `Расширение - Удаление`, `Расширение - Изменение` и `Документирующий комментарий` (последний использует `{@llm}` — чтобы он заработал, создайте профиль LLM и выберите его в шаблоне).
+
+Пример файла (промпт шаблона `Документирующий комментарий` сокращен; в наборе по умолчанию он подробно описывает правила оформления по стандартам разработки 1С):
 
 ```json
 [
   {
     "name": "Код добавлен",
-    "template": "{@line_limit max=110 mode=wrap suffix=\"// \"}// + {author}. {datetime}. [{issue_key}] {issue_summary}{@end}\n{text}\n// - {author}. {datetime}.",
+    "template": "{@line_limit max=120 mode=wrap suffix=\"// \"}// + {author}. {datetime}. [{issue_key}] {issue_summary}{@end}\n{text}\n// - {author}. {datetime}.",
     "hotkey": "ctrl+alt+1",
     "source": "Мой Jira фильтр",
     "hidden": false
   },
   {
-    "name": "Документирующий комментарий",
-    "template": "{@line_limit max=120 mode=wrap suffix=\"// \"}// {author}. {datetime}. [{issue_key}] {issue_summary}{@end}\n{@llm}\nСформируй документирующий комментарий метода в строгом формате:\n// <Краткое описание 1-2 предложения>\n// Параметры:\n//   <ИмяПараметра> - <Типы параметра> - <Краткое описание параметра>\n//\n\nЕсли это функция, добавь\n// Возвращаемое значение:\n//   <Типы возвращаемого значения> - Краткое описание\n\nОтвечай только комментарием, без пояснений.\n\nМетод:\n{text}\n{@end}\n{text}",
-    "source": "Мой Jira фильтр",
-    "llm_profile": "OpenAI"
-  },
-  {
     "name": "Код удален",
-    "template": "{@line_limit max=110 mode=wrap suffix=\"// \"}// + {author}. {datetime}. [{issue_key}] {issue_summary}{@end}\n{text|prefix=\"// \"}\n// - {author}. {datetime}."
+    "template": "{@line_limit max=120 mode=wrap suffix=\"// \"}// + {author}. {datetime}. [{issue_key}] {issue_summary}{@end}\n{text|prefix=\"//\"}\n// - {author}. {datetime}."
   },
   {
-    "name": "Функция добавлена",
-    "template": "{@line_limit max=110 mode=wrap suffix=\"// \"}// {author}. {datetime}. [{issue_key}] {issue_summary}{@end}"
+    "name": "Код изменен",
+    "template": "{@line_limit max=120 mode=wrap suffix=\"// \"}// + {author}. {datetime}. [{issue_key}] {issue_summary}{@end}\n{text|prefix=\"//\"}\n{text}\n// - {author}. {datetime}."
+  },
+  {
+    "name": "Метод добавлен",
+    "template": "{@line_limit max=120 mode=wrap suffix=\"// \"}// {author}. {datetime}. [{issue_key}] {issue_summary}{@end}"
   },
   {
     "name": "Коммит",
@@ -148,6 +148,20 @@ python src/app.py
   {
     "name": "Метаданные",
     "template": "// {author}. {date}. {issue_key}."
+  },
+  {
+    "name": "Номер задачи",
+    "template": "{issue_key}"
+  },
+  {
+    "name": "Расширение - Изменение",
+    "template": "#Удаление\n{text}\n#КонецУдаления\n#Вставка\n{text}\n#КонецВставки"
+  },
+  {
+    "name": "Документирующий комментарий",
+    "template": "{@line_limit max=120 mode=wrap suffix=\"// \"}// {author}. {datetime}. [{issue_key}] {issue_summary}{@end}\n{@llm}\nПодготовь документирующий комментарий для процедуры или функции на встроенном языке 1С:Предприятие (BSL) по стандартам разработки 1С.\n...\nПодготовь документирующий комментарий для:\n{text}\n{@end}\n{text}",
+    "source": "Мой Jira фильтр",
+    "llm_profile": "OpenAI"
   }
 ]
 ```
@@ -303,7 +317,7 @@ line 2
 ### Блочная директива `line_limit`
 
 Формат:
-- `{@line_limit max=110 mode=wrap suffix="// "}`
+- `{@line_limit max=120 mode=wrap suffix="// "}`
 - `...текст и/или макросы внутри блока...`
 - `{@end}`
 
@@ -320,7 +334,7 @@ line 2
 Пример выборочного применения:
 
 ```text
-{@line_limit max=110 mode=wrap suffix="// "}
+{@line_limit max=120 mode=wrap suffix="// "}
 // + {author}. {datetime}. [{issue_key}] {issue_summary}
 {@end}
 {text}
