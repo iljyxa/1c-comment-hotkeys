@@ -51,13 +51,11 @@ python src/app.py
 
 ## Сборка релиза (PyInstaller)
 
-В проект добавлен workflow GitHub Actions: `.github/workflows/release-pyinstaller.yml`.
+Сборка выполняется в GitHub Actions на Windows (PyInstaller onefile).
 
-- Сборка выполняется для Windows.
-- Триггер релиза: push тега формата `v*` (например, `v1.2.0`).
-- На выходе формируются артефакты:
-- `1c-comment-hotkeys-windows.exe`
-- Для тегов автоматически публикуется GitHub Release с этим файлом.
+- Релиз: `.github/workflows/release-pyinstaller.yml`, триггер — push тега формата `v*` (например, `v1.3`). Публикуется GitHub Release с файлом `1c-comment-hotkeys.exe`.
+- Пре-релиз: `.github/workflows/prerelease-pyinstaller.yml`, триггер — push в любую ветку. Пересоздаётся пре-релиз с тегом `v0.0` — это тестовая сборка последнего пуша.
+- Версия нигде в коде не хранится, источник версии — только git-тег.
 
 ## Использование
 
