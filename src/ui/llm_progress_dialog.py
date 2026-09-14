@@ -33,6 +33,9 @@ class LlmProgressDialog(QDialog):
 
         self.setWindowTitle("Запрос к LLM")
         self.setMinimumWidth(360)
+        # Окно одноразовое: после закрытия (завершение или отмена) удаляется,
+        # иначе каждый запрос оставлял бы скрытый виджет у главного окна.
+        self.setAttribute(Qt.WA_DeleteOnClose)
         self.setWindowModality(Qt.ApplicationModal)
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint | Qt.Dialog)
 
@@ -81,6 +84,7 @@ class LlmProgressDialog(QDialog):
         self.activateWindow()
 
     def reject(self) -> None:
+        # `done()` внутри учитывает WA_DeleteOnClose, отдельный close() не нужен.
         if not self._finished:
             self._finished = True
             self._timer.stop()

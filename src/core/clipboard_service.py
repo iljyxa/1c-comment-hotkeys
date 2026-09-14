@@ -121,6 +121,7 @@ class ClipboardService:
         try:
             if selected_text is None:
                 logger.warning("Выделенный текст отсутствует, обрабатывать нечего")
+                self.restore_original_clipboard()
                 return False
             modified_text = self.render_text(selected_text, comment, context)
         except Exception as e:
