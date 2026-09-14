@@ -20,6 +20,7 @@ class AppSettings:
     start_minimized: bool = True
     log_to_file: bool = False
     author: str = "AUTHOR"
+    encrypt_tokens: bool = True
 
 
 class SettingsRepository:
@@ -52,11 +53,13 @@ class SettingsRepository:
             start_minimized = self._extract_start_minimized(data)
             log_to_file = self._extract_log_to_file(data)
             author = self._extract_author(data)
+            encrypt_tokens = self._extract_encrypt_tokens(data)
             self.settings = AppSettings(
                 hotkey_combination=hotkey,
                 start_minimized=start_minimized,
                 log_to_file=log_to_file,
                 author=author,
+                encrypt_tokens=encrypt_tokens,
             )
             logger.info("Настройки загружены")
         except Exception as exc:
@@ -91,6 +94,9 @@ class SettingsRepository:
                 "start_minimized": self.settings.start_minimized,
                 "log_to_file": self.settings.log_to_file,
                 "author": self.settings.author,
+            },
+            "security": {
+                "encrypt_tokens": self.settings.encrypt_tokens,
             },
         })
         try:
@@ -136,6 +142,14 @@ class SettingsRepository:
         """Обновить автора для макроса `{author}`."""
         self.settings.author = str(value or "").strip()
 
+    def get_encrypt_tokens(self) -> bool:
+        """Вернуть флаг шифрования токенов Jira на диске (DPAPI)."""
+        return self.settings.encrypt_tokens
+
+    def set_encrypt_tokens(self, value: bool) -> None:
+        """Обновить флаг шифрования токенов Jira на диске (DPAPI)."""
+        self.settings.encrypt_tokens = bool(value)
+
     @staticmethod
     def _extract_hotkey(config: dict) -> Optional[str]:
         """Извлечь горячую клавишу из структуры конфигурации."""
@@ -163,6 +177,14 @@ class SettingsRepository:
         if isinstance(ui, dict) and "log_to_file" in ui:
             return bool(ui.get("log_to_file"))
         return False
+
+    @staticmethod
+    def _extract_encrypt_tokens(config: dict) -> bool:
+        """Извлечь флаг шифрования токенов; по умолчанию включено."""
+        security = config.get("security")
+        if isinstance(security, dict) and "encrypt_tokens" in security:
+            return bool(security.get("encrypt_tokens"))
+        return True
 
     @staticmethod
     def _extract_author(config: dict) -> str:

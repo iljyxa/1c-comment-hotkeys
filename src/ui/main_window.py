@@ -379,8 +379,9 @@ class JiraSourcesDialog(QDialog):
     _TIMEOUT_MIN = 1
     _TIMEOUT_MAX = 120
 
-    def __init__(self, sources: list[JiraSource], parent=None):
+    def __init__(self, sources: list[JiraSource], parent=None, encrypt_tokens: bool = True):
         super().__init__(parent)
+        self._encrypt_tokens = bool(encrypt_tokens)
         self.setWindowTitle("Источники Jira")
         self.setMinimumWidth(900)
         self.setMinimumHeight(420)
@@ -447,7 +448,13 @@ class JiraSourcesDialog(QDialog):
         edit.setEchoMode(
             QLineEdit.Normal if self.show_tokens_checkbox.isChecked() else QLineEdit.Password
         )
-        edit.setToolTip("Токен хранится на диске в зашифрованном виде (Windows DPAPI)")
+        if self._encrypt_tokens:
+            edit.setToolTip("Токен хранится на диске в зашифрованном виде (Windows DPAPI)")
+        else:
+            edit.setToolTip(
+                "Токен хранится на диске открытым текстом "
+                "(шифрование отключено в настройках приложения)"
+            )
         return edit
 
     def _on_show_tokens_toggled(self, checked: bool) -> None:
@@ -622,9 +629,16 @@ class MainWindow(QMainWindow):
         self.start_minimized_checkbox = QCheckBox("Запускать в системном трее")
         self.log_to_file_checkbox = QCheckBox("Лог")
         self.log_to_file_checkbox.toggled.connect(self._on_log_to_file_toggled)
+        self.encrypt_tokens_checkbox = QCheckBox("Шифровать токены Jira")
+        self.encrypt_tokens_checkbox.setToolTip(
+            "Хранить токены источников Jira в jira_sources.json зашифрованными через "
+            "Windows DPAPI (привязка к текущей учетной записи). "
+            "При отключении токены будут записаны открытым текстом."
+        )
         checkboxes_row = QHBoxLayout()
         checkboxes_row.addWidget(self.start_minimized_checkbox)
         checkboxes_row.addWidget(self.log_to_file_checkbox)
+        checkboxes_row.addWidget(self.encrypt_tokens_checkbox)
         checkboxes_row.addStretch()
         settings_layout.addRow("", checkboxes_row)
 
@@ -872,7 +886,11 @@ class MainWindow(QMainWindow):
 
     def _on_sources_clicked(self) -> None:
         """Открыть диалог редактирования Jira-источников."""
-        dialog = JiraSourcesDialog(self.jira_sources_repository.get_all(), parent=self)
+        dialog = JiraSourcesDialog(
+            self.jira_sources_repository.get_all(),
+            parent=self,
+            encrypt_tokens=self.jira_sources_repository.get_encrypt_tokens(),
+        )
         if dialog.exec() != QDialog.Accepted:
             return
 
@@ -962,8 +980,19 @@ class MainWindow(QMainWindow):
                 self.log_to_file_checkbox.isChecked()
             )
             self.settings_repository.set_author(self.author_input.text())
+            encrypt_tokens = self.encrypt_tokens_checkbox.isChecked()
+            self.settings_repository.set_encrypt_tokens(encrypt_tokens)
             self.settings_repository.save()
             self.repository.save()
+            if encrypt_tokens != self.jira_sources_repository.get_encrypt_tokens():
+                # Переключение вступает в силу сразу: файл источников пересохраняется
+                # в нужном виде, не дожидаясь следующего редактирования источников.
+                self.jira_sources_repository.set_encrypt_tokens(encrypt_tokens)
+                self.jira_sources_repository.save()
+                logger.info(
+                    "Шифрование токенов Jira %s, файл источников пересохранен",
+                    "включено" if encrypt_tokens else "отключено",
+                )
             QMessageBox.information(self, "Успех", "Настройки и комментарии сохранены")
             logger.info("Настройки и комментарии сохранены")
         except ValueError as e:
@@ -982,6 +1011,9 @@ class MainWindow(QMainWindow):
             self.settings_repository.get_log_to_file()
         )
         self.author_input.setText(self.settings_repository.get_author())
+        self.encrypt_tokens_checkbox.setChecked(
+            self.settings_repository.get_encrypt_tokens()
+        )
 
     def _on_log_to_file_toggled(self, checked: bool) -> None:
         """Включить/выключить запись логов в файл сразу при переключении флага."""

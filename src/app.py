@@ -81,7 +81,8 @@ class Application:
         self._file_log_handler = None
         self._apply_file_logging(self.settings_repository.get_log_to_file())
         self.jira_sources_repository = JiraSourcesRepository(
-            config_dir=self.repository.config_dir
+            config_dir=self.repository.config_dir,
+            encrypt_tokens=self.settings_repository.get_encrypt_tokens(),
         )
         self.jira_sources_repository.load()
         

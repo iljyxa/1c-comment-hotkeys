@@ -61,7 +61,7 @@ class JiraSource:
 class JiraSourcesRepository:
     """Репозиторий источников Jira."""
 
-    def __init__(self, config_dir: Optional[Path] = None):
+    def __init__(self, config_dir: Optional[Path] = None, encrypt_tokens: bool = True):
         if config_dir is None:
             config_dir = get_config_dir()
 
@@ -70,12 +70,22 @@ class JiraSourcesRepository:
         self.sources_file = self.config_dir / "jira_sources.json"
         self._sources: List[JiraSource] = []
         self.load_warning: Optional[str] = None
+        self._encrypt_tokens = bool(encrypt_tokens)
+
+    def get_encrypt_tokens(self) -> bool:
+        return self._encrypt_tokens
+
+    def set_encrypt_tokens(self, value: bool) -> None:
+        """Переключить шифрование токенов; вступает в силу при следующем `save()`."""
+        self._encrypt_tokens = bool(value)
 
     def load(self) -> None:
         """Загрузить источники из файла конфигурации.
 
-        Токены в файле хранятся зашифрованными через DPAPI (`dpapi:<base64>`).
-        Токены открытым текстом (legacy) принимаются и перешифровываются сразу.
+        При включенном шифровании токены в файле хранятся как `dpapi:<base64>`,
+        при выключенном — открытым текстом. Если состояние файла не совпадает
+        с настройкой (например, настройку только что переключили или файл
+        пришел из старой версии), файл сразу пересохраняется в нужном виде.
         """
         self.load_warning = None
         if not self.sources_file.exists():
@@ -100,12 +110,14 @@ class JiraSourcesRepository:
             return
 
         has_plaintext_token = False
+        has_protected_token = False
         undecryptable: List[str] = []
         for source in sources:
             if not secret_store.is_protected(source.token):
                 if source.token:
                     has_plaintext_token = True
                 continue
+            has_protected_token = True
             try:
                 source.token = secret_store.unprotect(source.token)
             except Exception as exc:
@@ -124,20 +136,31 @@ class JiraSourcesRepository:
                 "Введите их заново в окне «Источники»."
             )
 
-        if has_plaintext_token and secret_store.is_available():
-            logger.info("Обнаружены токены Jira открытым текстом, выполняется шифрование")
+        needs_rewrite = (
+            (self._encrypt_tokens and has_plaintext_token and secret_store.is_available())
+            or (not self._encrypt_tokens and has_protected_token and not undecryptable)
+        )
+        if needs_rewrite:
+            logger.info(
+                "Состояние токенов Jira в файле не совпадает с настройкой шифрования (%s), файл пересохраняется",
+                "включено" if self._encrypt_tokens else "выключено",
+            )
             try:
                 self.save()
             except Exception:
-                logger.warning("Не удалось перешифровать токены Jira при загрузке")
+                logger.warning("Не удалось пересохранить токены Jira при загрузке")
 
     def save(self) -> None:
-        """Сохранить источники в файл конфигурации (токены шифруются через DPAPI)."""
+        """Сохранить источники в файл конфигурации.
+
+        Токены шифруются через DPAPI, если шифрование включено в настройках.
+        """
         try:
             data = []
             for source in self._sources:
                 item = source.to_dict()
-                item["token"] = secret_store.protect(source.token)
+                if self._encrypt_tokens:
+                    item["token"] = secret_store.protect(source.token)
                 data.append(item)
             atomic_write_json(self.sources_file, data, indent=2, ensure_ascii=False)
             logger.info("Сохранено источников Jira: %d", len(self._sources))

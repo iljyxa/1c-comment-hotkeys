@@ -82,7 +82,7 @@
 - Хранение Jira-источников в `jira_sources.json`
 - CRUD операции через таблицу в окне "Источники" (токены в таблице маскируются)
 - Для источника доступны `ttl_minutes`, `timeout_seconds`, `auto_refresh`
-- Токены на диске шифруются через `SecretStore` (DPAPI); открытые legacy-токены перешифровываются при загрузке
+- Токены на диске шифруются через `SecretStore` (DPAPI), если включена настройка `security.encrypt_tokens` (по умолчанию включена); при загрузке файл приводится к текущей настройке (открытые токены шифруются / зашифрованные раскрываются)
 
 ### SecretStore (`core/secret_store.py`)
 - Шифрование секретов через Windows DPAPI (`CryptProtectData`/`CryptUnprotectData` через `ctypes`, без внешних зависимостей)
