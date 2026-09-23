@@ -49,6 +49,8 @@ class TemplateEngine:
         name: str
         args: tuple[tuple[str, str], ...]
         children: list["TemplateEngine._Token"]
+        # Текст, который вернется в результат, если блок не закрыт.
+        orphan_text: str
 
     _Token = _LiteralToken | _MacroToken | _BlockToken
 
@@ -177,66 +179,112 @@ class TemplateEngine:
         while idx < length:
             start = template.find("{", idx)
             if start == -1:
-                if idx < length:
-                    token_lists[-1].append(self._LiteralToken(template[idx:]))
+                token_lists[-1].append(self._LiteralToken(template[idx:]))
                 break
-
-            if start > idx:
-                token_lists[-1].append(self._LiteralToken(template[idx:start]))
 
             end = template.find("}", start + 1)
             if end == -1:
-                token_lists[-1].append(self._LiteralToken(template[start:]))
+                token_lists[-1].append(self._LiteralToken(template[idx:]))
                 break
 
             raw = template[start:end + 1]
             directive = self._parse_directive(raw)
-            if directive is not None:
-                directive_name, directive_args = directive
-                if directive_name == "end":
-                    if not open_blocks:
-                        token_lists[-1].append(self._LiteralToken(raw))
-                    else:
-                        finished = open_blocks.pop()
-                        token_lists.pop()
-                        token_lists[-1].append(
-                            self._BlockToken(
-                                raw_start=finished.raw_start,
-                                name=finished.name,
-                                args=finished.args,
-                                children=tuple(finished.children),
-                            )
-                        )
-                else:
-                    if directive_name not in self._block_handlers:
-                        token_lists[-1].append(self._LiteralToken(raw))
-                    else:
-                        block = self._OpenBlock(
-                            raw_start=raw,
-                            name=directive_name,
-                            args=directive_args,
-                            children=[],
-                        )
-                        open_blocks.append(block)
-                        token_lists.append(block.children)
+            is_block_start = (
+                directive is not None and directive[0] != "end" and directive[0] in self._block_handlers
+            )
+            is_block_end = directive is not None and directive[0] == "end" and bool(open_blocks)
+
+            if not (is_block_start or is_block_end):
+                if start > idx:
+                    token_lists[-1].append(self._LiteralToken(template[idx:start]))
+                parsed_macro = None if directive is not None else self._parse_macro(raw)
+                token_lists[-1].append(parsed_macro if parsed_macro is not None else self._LiteralToken(raw))
                 idx = end + 1
                 continue
 
-            parsed_macro = self._parse_macro(raw)
-            if parsed_macro is None:
-                token_lists[-1].append(self._LiteralToken(raw))
-            else:
-                token_lists[-1].append(parsed_macro)
+            # Директива одна на строке — это разметка шаблона, а не текст: сама
+            # строка в результат не попадает. Открывающая забирает свой перевод
+            # строки, закрывающая — предыдущий: так перевод строки после
+            # {@end} остается снаружи блока, даже если блок (как {@llm})
+            # срезает переводы строк по краям своего содержимого.
+            literal_end = start
+            next_idx = end + 1
+            orphan_text = raw
+            standalone = self._find_standalone_line(template, start, end + 1)
+            if standalone is not None:
+                line_start, tail_end, line_end = standalone
+                if is_block_start:
+                    literal_end = line_start
+                    next_idx = line_end
+                    orphan_text = template[line_start:line_end]
+                else:
+                    literal_end = line_start
+                    # Перевод строки перед тегом мог уже забрать предыдущий открывающий тег.
+                    if line_start - 1 >= idx:
+                        literal_end = line_start - 1
+                        if literal_end - 1 >= idx and template[literal_end - 1] == "\r":
+                            literal_end -= 1
+                    next_idx = tail_end
 
-            idx = end + 1
+            if literal_end > idx:
+                token_lists[-1].append(self._LiteralToken(template[idx:literal_end]))
+            idx = next_idx
+
+            if is_block_end:
+                finished = open_blocks.pop()
+                token_lists.pop()
+                token_lists[-1].append(
+                    self._BlockToken(
+                        raw_start=finished.raw_start,
+                        name=finished.name,
+                        args=finished.args,
+                        children=tuple(finished.children),
+                    )
+                )
+                continue
+
+            directive_name, directive_args = directive
+            block = self._OpenBlock(
+                raw_start=raw,
+                name=directive_name,
+                args=directive_args,
+                children=[],
+                orphan_text=orphan_text,
+            )
+            open_blocks.append(block)
+            token_lists.append(block.children)
 
         while open_blocks:
             orphan = open_blocks.pop()
             token_lists.pop()
-            token_lists[-1].append(self._LiteralToken(orphan.raw_start))
+            # Незакрытый блок остается текстом как есть, вместе со строкой тега.
+            token_lists[-1].append(self._LiteralToken(orphan.orphan_text))
             token_lists[-1].extend(orphan.children)
 
         return tuple(root_tokens)
+
+    @staticmethod
+    def _find_standalone_line(template: str, start: int, end: int) -> Optional[tuple[int, int, int]]:
+        """Границы строки, если на ней кроме тега `template[start:end]` только пробелы и табуляции.
+
+        Returns:
+            `(начало строки, конец пробелов после тега, позиция за переводом строки)`
+            или `None`, если на строке есть что-то еще.
+        """
+        line_start = template.rfind("\n", 0, start) + 1
+        if template[line_start:start].strip(" \t"):
+            return None
+
+        tail_end = end
+        while tail_end < len(template) and template[tail_end] in " \t":
+            tail_end += 1
+        if template.startswith("\r\n", tail_end):
+            return line_start, tail_end, tail_end + 2
+        if template.startswith("\n", tail_end):
+            return line_start, tail_end, tail_end + 1
+        if tail_end == len(template):
+            return line_start, tail_end, tail_end
+        return None
 
     def _parse_macro(self, raw: str) -> Optional[_MacroToken]:
         if not (raw.startswith("{") and raw.endswith("}")):
