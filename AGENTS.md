@@ -43,6 +43,7 @@ src/core/
   jira_sources_repository.py     источники Jira → jira_sources.json (токены зашифрованы)
   llm_profiles_repository.py     профили LLM → llm_profiles.json (ключи зашифрованы)
   llm_client.py                  POST /chat/completions через urllib, LlmError/TimeoutError
+  llm_answer_cache.py            последние ответы LLM в памяти (ключ — хэш профиля и промпта)
   secret_store.py                Windows DPAPI через ctypes, формат "dpapi:<base64>",
                                  unprotect_all() — общая логика загрузки секретов
   jira_issues_service.py         запросы к Jira REST (/rest/api/2/search), stale-while-revalidate
@@ -106,7 +107,9 @@ src/resources_rc.py              сгенерированный Qt-ресурс 
    ничего не вставляется (движок *не* подставляет исходный текст блока, как
    делает для других директив, — иначе в код попал бы промпт). Быстрый путь
    для шаблонов без `{@llm}` (`process_captured_text`) не менялся — его
-   задержки см. в п. 5.
+   задержки см. в п. 5. Исключение — все ответы уже в `LlmAnswerCache`:
+   тогда рендер без запросов идет в главном потоке и вставка сразу. Кэш
+   ответов только в памяти, на диск промпты и ответы не попадают.
 
 ## Конфигурация во время работы
 

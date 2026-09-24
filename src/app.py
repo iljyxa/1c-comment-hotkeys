@@ -24,6 +24,7 @@ from core.jira_issues_service import JiraIssuesService, JiraIssuesError
 from core.jira_last_issue_repository import JiraLastIssueRepository
 from core.llm_profiles_repository import LlmProfilesRepository
 from core.llm_client import LlmClient
+from core.llm_answer_cache import LlmAnswerCache
 from ui.main_window import MainWindow
 from ui.comment_dialog import CommentDialog
 from ui.issue_dialog import IssueDialog
@@ -47,6 +48,10 @@ class AppSignals(QObject):
     # threading.Thread не срабатывает (у потока нет event loop), поэтому все
     # фоновые воркеры возвращают результат в UI только через этот сигнал.
     invoke_in_main_thread = Signal(object)
+
+
+class _LlmCacheMiss(TemplateRenderError):
+    """Ответа нет в кэше: при рендере только из кэша нужен настоящий запрос."""
 
 
 class _LlmFlowState:
@@ -108,6 +113,7 @@ class Application:
         )
         self.llm_profiles_repository.load()
         self.llm_client = LlmClient()
+        self.llm_answer_cache = LlmAnswerCache()
         
         # Инициализация интеграции Jira
         config_dir = self.repository.config_dir
@@ -126,6 +132,7 @@ class Application:
             hotkey_change_handler=self._apply_hotkey,
             log_to_file_change_handler=self._apply_file_logging,
             refresh_sources_handler=self._refresh_all_sources,
+            clear_llm_cache_handler=self._clear_llm_answer_cache,
             exit_handler=self.request_exit,
         )
         self.main_window.setWindowIcon(self.qt_app.windowIcon())
@@ -612,10 +619,20 @@ class Application:
             context["author"] = self.settings_repository.get_author()
 
             if self.template_engine.uses_llm(comment.template):
-                # Долгий путь: рендер в фоне, вставка после ответа модели.
-                # Буфер обмена вернется пользователю в finally на время ожидания.
                 context["llm_profile"] = comment.llm_profile
-                self._start_llm_flow(comment, selected_text, context, self._target_window_handle)
+                rendered = self._render_from_llm_cache(comment, selected_text, context)
+                if rendered is None:
+                    # Долгий путь: рендер в фоне, вставка после ответа модели.
+                    # Буфер обмена вернется пользователю в finally на время ожидания.
+                    self._start_llm_flow(comment, selected_text, context, self._target_window_handle)
+                    return
+                # Все ответы модели уже есть в кэше (повторный вызов того же
+                # шаблона на том же тексте) — вставляем сразу, без окна ожидания.
+                self._restore_foreground_window_handle(self._target_window_handle)
+                if self.clipboard_service.paste_text(rendered):
+                    logger.info("Обработка текста с LLM из кэша завершена успешно")
+                else:
+                    logger.warning("Не удалось вставить результат рендера с LLM из кэша")
                 return
 
             # Восстановить окно назначения непосредственно перед вставкой.
@@ -652,34 +669,80 @@ class Application:
             logger.debug("Не удалось получить дескриптор активного окна: %s", exc)
             return None
 
+    def _render_from_llm_cache(self, comment, selected_text: str, context: dict) -> str | None:
+        """Отрендерить шаблон с `{@llm}`, если все ответы модели уже в кэше.
+
+        Returns:
+            Готовый текст или `None`, если нужен хотя бы один настоящий запрос
+            (или рендер не удался — тогда причину покажет обычный сценарий).
+        """
+        cache_context = dict(context)
+        cache_context["_llm_cache_only"] = True
+        try:
+            return self.clipboard_service.render_text(selected_text, comment, cache_context)
+        except _LlmCacheMiss:
+            return None
+        except Exception as exc:
+            logger.debug("Рендер из кэша LLM не удался: %s", exc)
+            return None
+
+    def _clear_llm_answer_cache(self) -> None:
+        """Сбросить кэш ответов LLM, чтобы следующий вызов спросил модель заново."""
+        removed = self.llm_answer_cache.clear()
+        logger.info("Кэш ответов LLM очищен, удалено ответов: %d", removed)
+        self.main_window.show_tray_message("Кэш ответов LLM очищен.")
+
     def _resolve_llm(self, prompt: str, context: dict) -> str:
         """Обработчик директивы `{@llm}` для движка шаблонов.
 
         Вызывается из фонового потока рендера. Профиль берется из контекста
         (`Comment.llm_profile`), ошибки превращаются в `TemplateRenderError`,
         чтобы движок прервал рендер, а не подставил промпт в результат.
+        С `_llm_cache_only` в контексте (попытка рендера в главном потоке)
+        запросы не выполняются: промах кэша — `_LlmCacheMiss`.
         """
+        cache_only = bool(context.get("_llm_cache_only"))
         flow = context.get("_llm_flow")
         if isinstance(flow, _LlmFlowState) and flow.cancel_event.is_set():
             raise TemplateRenderError("Запрос к LLM отменен")
 
         profile_name = str(context.get("llm_profile") or "").strip()
         if not profile_name:
+            if cache_only:
+                raise _LlmCacheMiss("Профиль LLM не выбран")
             raise TemplateRenderError(
                 "В шаблоне есть директива {@llm}, но профиль LLM для комментария не выбран."
             )
         profile = self.llm_profiles_repository.get_by_name(profile_name)
         if profile is None:
+            if cache_only:
+                raise _LlmCacheMiss("Профиль LLM не найден")
             raise TemplateRenderError(f"Профиль LLM «{profile_name}» не найден.")
+
+        cached = self.llm_answer_cache.get(profile, prompt)
+        if cached is not None:
+            logger.info(
+                "Ответ LLM взят из кэша: профиль='%s', длина промпта=%d, длина ответа=%d",
+                profile_name,
+                len(prompt),
+                len(cached),
+            )
+            return cached
+        if cache_only:
+            raise _LlmCacheMiss("Ответа нет в кэше")
 
         if isinstance(flow, _LlmFlowState):
             flow.requests_done += 1
             self._report_llm_progress(flow, profile_name)
         try:
-            return self.llm_client.complete(profile, prompt)
+            answer = self.llm_client.complete(profile, prompt)
         except Exception as exc:
             # TimeoutError и LlmError несут готовое сообщение для пользователя.
             raise TemplateRenderError(str(exc)) from exc
+        # Кэшируем и ответ отмененного сценария: повтор после отмены тогда
+        # не ждет модель заново, если ответ успел прийти.
+        self.llm_answer_cache.put(profile, prompt, answer)
+        return answer
 
     def _report_llm_progress(self, flow: "_LlmFlowState", profile_name: str) -> None:
         """Обновить строку состояния диалога ожидания (из любого потока)."""

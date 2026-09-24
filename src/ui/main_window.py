@@ -822,6 +822,7 @@ class MainWindow(QMainWindow):
         log_to_file_change_handler: Callable[[bool], None],
         refresh_sources_handler: Callable[[], None],
         exit_handler: Callable[[], None],
+        clear_llm_cache_handler: Optional[Callable[[], None]] = None,
     ):
         """Инициализировать главное окно.
         
@@ -838,6 +839,7 @@ class MainWindow(QMainWindow):
         self.log_to_file_change_handler = log_to_file_change_handler
         self.refresh_sources_handler = refresh_sources_handler
         self.exit_handler = exit_handler
+        self.clear_llm_cache_handler = clear_llm_cache_handler
         self._allow_close = False
         self._capturing_hotkey = False
         
@@ -993,6 +995,11 @@ class MainWindow(QMainWindow):
         refresh_action = QAction("Обновить источники", self)
         refresh_action.triggered.connect(self._on_refresh_sources_clicked)
         tray_menu.addAction(refresh_action)
+
+        if self.clear_llm_cache_handler is not None:
+            clear_llm_cache_action = QAction("Сбросить кэш ответов LLM", self)
+            clear_llm_cache_action.triggered.connect(self.clear_llm_cache_handler)
+            tray_menu.addAction(clear_llm_cache_action)
         
         quit_action = QAction("Выход", self)
         quit_action.triggered.connect(self.exit_handler)
@@ -1019,6 +1026,13 @@ class MainWindow(QMainWindow):
         self.show()
         self.raise_()
         self.activateWindow()
+
+    def show_tray_message(self, text: str) -> None:
+        """Короткое уведомление из трея (без трея — обычное окно сообщения)."""
+        if hasattr(self, "tray_icon") and self.tray_icon.isVisible():
+            self.tray_icon.showMessage("1C Comment Hotkeys", text, QSystemTrayIcon.Information, 2000)
+        else:
+            QMessageBox.information(self, "1C Comment Hotkeys", text)
 
     def _on_refresh_sources_clicked(self) -> None:
         """Запросить обновление всех источников."""
