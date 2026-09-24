@@ -56,7 +56,7 @@ python src/app.py
 Сборка выполняется в GitHub Actions на Windows (PyInstaller onefile).
 
 - Релиз: `.github/workflows/release-pyinstaller.yml`, триггер — push тега формата `v*` (например, `v1.3`). Публикуется GitHub Release с файлом `1c-comment-hotkeys.exe`.
-- Пре-релиз: `.github/workflows/prerelease-pyinstaller.yml`, триггер — push в любую ветку. Пересоздаётся пре-релиз с тегом `v0.0` — это тестовая сборка последнего пуша.
+- Пре-релиз: `.github/workflows/prerelease-pyinstaller.yml`, триггер — push в `main` или ручной запуск (в том числе для другой ветки). Пересоздаётся пре-релиз с тегом `v0.0` — это тестовая сборка последнего запуска.
 - Версия нигде в коде не хранится, источник версии — только git-тег.
 
 ## Использование
